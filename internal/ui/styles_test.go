@@ -46,7 +46,7 @@ func TestRenderStatusAndPriority(t *testing.T) {
 		want   string
 	}{
 		{"open", StatusOpenStyle.Render("open")},
-		{"in_progress", StatusInProgressStyle.Render("in_progress")},
+		{"working", StatusInProgressStyle.Render("working")},
 		{"blocked", StatusBlockedStyle.Render("blocked")},
 		{"pinned", StatusPinnedStyle.Render("pinned")},
 		{"hooked", StatusHookedStyle.Render("hooked")},
@@ -121,12 +121,12 @@ func TestRenderTypeVariants(t *testing.T) {
 }
 
 func TestRenderIssueCompact(t *testing.T) {
-	open := RenderIssueCompact("bd-1", 0, "bug", "in_progress", "ship it")
+	open := RenderIssueCompact("bd-1", 0, "bug", "working", "ship it")
 	wantOpen := fmt.Sprintf("%s [%s] [%s] %s - %s",
 		RenderID("bd-1"),
 		RenderPriority(0),
 		RenderType("bug"),
-		RenderStatus("in_progress"),
+		RenderStatus("working"),
 		"ship it",
 	)
 	if open != wantOpen {
@@ -172,7 +172,7 @@ func TestGetStatusIconWithCategory(t *testing.T) {
 	}{
 		// Built-in statuses always return their own icon regardless of category
 		{"open", "open", "", StatusIconOpen},
-		{"in_progress", "in_progress", "", StatusIconInProgress},
+		{"working", "working", "", StatusIconInProgress},
 		{"blocked", "blocked", "", StatusIconBlocked},
 		{"closed", "closed", "", StatusIconClosed},
 		{"deferred", "deferred", "", StatusIconDeferred},
@@ -199,7 +199,7 @@ func TestGetStatusIconWithCategory(t *testing.T) {
 
 func TestRenderStatusIconBuiltIns(t *testing.T) {
 	// All built-in statuses should return non-empty strings
-	builtIns := []string{"open", "in_progress", "blocked", "closed", "deferred", "pinned"}
+	builtIns := []string{"open", "working", "blocked", "closed", "deferred", "pinned"}
 	for _, status := range builtIns {
 		icon := RenderStatusIcon(status)
 		if icon == "" {
@@ -216,7 +216,7 @@ func TestRenderStatusIconBuiltIns(t *testing.T) {
 func TestGetStatusIconBuiltIns(t *testing.T) {
 	expected := map[string]string{
 		"open":        StatusIconOpen,
-		"in_progress": StatusIconInProgress,
+		"working": StatusIconInProgress,
 		"blocked":     StatusIconBlocked,
 		"closed":      StatusIconClosed,
 		"deferred":    StatusIconDeferred,
@@ -243,7 +243,7 @@ func TestRenderStatusIconWithCategory(t *testing.T) {
 	}{
 		// Built-in statuses return non-empty styled strings
 		{"open", "open", ""},
-		{"in_progress", "in_progress", ""},
+		{"working", "working", ""},
 		{"blocked", "blocked", ""},
 		{"closed", "closed", ""},
 		{"deferred", "deferred", ""},
@@ -274,9 +274,9 @@ func TestRenderStatusIconWithCategory(t *testing.T) {
 		t.Errorf("active custom icon %q != open icon %q", reviewActive, openIcon)
 	}
 
-	// Category-wip custom status should use the same icon as "in_progress"
+	// Category-wip custom status should use the same icon as "working"
 	testingWIP := RenderStatusIconWithCategory("testing", types.CategoryWIP)
-	inProgressIcon := RenderStatusIconWithCategory("in_progress", "")
+	inProgressIcon := RenderStatusIconWithCategory("working", "")
 	if testingWIP != inProgressIcon {
 		t.Errorf("wip custom icon %q != in_progress icon %q", testingWIP, inProgressIcon)
 	}

@@ -28,7 +28,7 @@ var closeIssueRunner = func(issueID string) error {
 var orphansCmd = &cobra.Command{
 	Use:   "orphans",
 	Short: "Identify orphaned issues (referenced in commits but still open)",
-	Long: `Identify orphaned issues - issues that are referenced in commit messages but remain open or in_progress in the database.
+	Long: `Identify orphaned issues - issues that are referenced in commit messages but remain open or working in the database.
 
 This helps identify work that has been implemented but not formally closed.
 

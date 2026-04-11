@@ -501,7 +501,7 @@ func splitLines(s string) []string {
 func randomStatus(rng *rand.Rand, openRatio float64) types.Status {
 	r := rng.Float64()
 	if r < openRatio {
-		// Open statuses: open, in_progress, blocked
+		// Open statuses: open, working, blocked
 		statuses := []types.Status{types.StatusOpen, types.StatusInProgress, types.StatusBlocked}
 		return statuses[rng.Intn(len(statuses))]
 	}

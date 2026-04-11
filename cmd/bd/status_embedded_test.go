@@ -62,7 +62,7 @@ func TestEmbeddedStatus(t *testing.T) {
 	bdCreate(t, bd, dir, "Status open 1", "--type", "task")
 	bdCreate(t, bd, dir, "Status open 2", "--type", "bug")
 	ip := bdCreate(t, bd, dir, "Status in_progress", "--type", "task", "--assignee", "alice")
-	bdUpdate(t, bd, dir, ip.ID, "--status", "in_progress")
+	bdUpdate(t, bd, dir, ip.ID, "--status", "working")
 	closed := bdCreate(t, bd, dir, "Status closed", "--type", "task")
 	bdClose(t, bd, dir, closed.ID)
 	bdCreate(t, bd, dir, "Status assigned bob", "--type", "task", "--assignee", "bob")

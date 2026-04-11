@@ -55,7 +55,7 @@ create, update, show, or close operation).`,
 				}
 			}
 			if !types.Status(status).IsValidWithCustom(customStatuses) {
-				FatalErrorRespectJSON("invalid status %q (built-in: open, in_progress, blocked, deferred, closed, pinned, hooked; or configure custom statuses via 'bd config set status.custom')", status)
+				FatalErrorRespectJSON("invalid status %q (built-in: open, working, blocked, deferred, closed, pinned, hooked; or configure custom statuses via 'bd config set status.custom')", status)
 			}
 			updates["status"] = status
 
@@ -604,7 +604,7 @@ func init() {
 	updateCmd.Flags().StringSlice("remove-label", nil, "Remove labels (repeatable)")
 	updateCmd.Flags().StringSlice("set-labels", nil, "Set labels, replacing all existing (repeatable)")
 	updateCmd.Flags().String("parent", "", "New parent issue ID (reparents the issue, use empty string to remove parent)")
-	updateCmd.Flags().Bool("claim", false, "Atomically claim the issue (sets assignee to you, status to in_progress; idempotent if already claimed by you)")
+	updateCmd.Flags().Bool("claim", false, "Atomically claim the issue (sets assignee to you, status to working; idempotent if already claimed by you)")
 	updateCmd.Flags().String("session", "", "Claude Code session ID for status=closed (or set CLAUDE_SESSION_ID env var)")
 	// Time-based scheduling flags (GH#820)
 	// Examples:

@@ -135,7 +135,7 @@ func TestDemoteToWisp_FieldUpdatesApplied(t *testing.T) {
 	if err := store.UpdateIssue(ctx, id, map[string]interface{}{
 		"no_history": true,
 		"title":      "updated title",
-		"status":     "in_progress",
+		"status":     "working",
 	}, "tester"); err != nil {
 		t.Fatalf("UpdateIssue: %v", err)
 	}
@@ -147,8 +147,8 @@ func TestDemoteToWisp_FieldUpdatesApplied(t *testing.T) {
 	if wisp.Title != "updated title" {
 		t.Errorf("title: got %q, want %q", wisp.Title, "updated title")
 	}
-	if wisp.Status != "in_progress" {
-		t.Errorf("status: got %q, want %q", wisp.Status, "in_progress")
+	if wisp.Status != "working" {
+		t.Errorf("status: got %q, want %q", wisp.Status, "working")
 	}
 	if !wisp.NoHistory {
 		t.Error("NoHistory should be true")

@@ -538,7 +538,7 @@ func TestListStatusFilterParity(t *testing.T) {
 		closed := w.create("--title", "Closed task", "--type", "task", "--priority", "3")
 		w.run("close", closed, "--reason", "done")
 		inProg := w.create("--title", "In progress task", "--type", "task", "--priority", "1")
-		w.run("update", inProg, "--status", "in_progress")
+		w.run("update", inProg, "--status", "working")
 	}
 
 	baselineWS := newWorkspace(t, baselineBin)
@@ -987,10 +987,10 @@ func TestReopenPreservesDeps(t *testing.T) {
 func TestStatusTransitions(t *testing.T) {
 	compareExports(t, func(w *workspace) {
 		id := w.create("--title", "Lifecycle issue", "--type", "task", "--priority", "2")
-		w.run("update", id, "--status", "in_progress")
+		w.run("update", id, "--status", "working")
 		w.run("close", id, "--reason", "completed")
 		w.run("reopen", id)
-		w.run("update", id, "--status", "in_progress")
+		w.run("update", id, "--status", "working")
 	})
 }
 

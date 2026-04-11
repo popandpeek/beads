@@ -21,7 +21,7 @@ func TestPrintHumanStats(t *testing.T) {
 			name: "mixed statuses",
 			issues: []*types.Issue{
 				{ID: "bd-1", Status: "open"},
-				{ID: "bd-2", Status: "in_progress"},
+				{ID: "bd-2", Status: "working"},
 				{ID: "bd-3", Status: "blocked"},
 				{ID: "bd-4", Status: "closed", CloseReason: "Responded"},
 				{ID: "bd-5", Status: "closed", CloseReason: "Dismissed: not needed"},

@@ -28,7 +28,7 @@ func TestProtocol_UpdateAcceptsBuiltinStatuses(t *testing.T) {
 	w := newWorkspace(t)
 	id := w.create("Test issue")
 
-	w.run("update", id, "--status", "in_progress")
+	w.run("update", id, "--status", "working")
 	w.run("update", id, "--status", "open")
 }
 

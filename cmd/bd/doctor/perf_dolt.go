@@ -171,7 +171,7 @@ func runDoltDiagnosticQueries(ctx context.Context, db *sql.DB, metrics *DoltPerf
 	// Measure GetReadyWork equivalent
 	metrics.ReadyWorkTime = measureQueryTime(ctx, db, `
 		SELECT id FROM issues
-		WHERE status IN ('open', 'in_progress')
+		WHERE status IN ('open', 'working')
 		AND id NOT IN (
 			SELECT issue_id FROM dependencies
 			WHERE depends_on_id IN (SELECT id FROM issues WHERE status != 'closed')
@@ -210,7 +210,7 @@ func runDoltDiagnosticQueries(ctx context.Context, db *sql.DB, metrics *DoltPerf
 		SELECT i.id, i.title, i.status, i.priority
 		FROM issues i
 		LEFT JOIN labels l ON i.id = l.issue_id
-		WHERE i.status IN ('open', 'in_progress')
+		WHERE i.status IN ('open', 'working')
 		AND i.priority <= 2
 		GROUP BY i.id
 		LIMIT 100

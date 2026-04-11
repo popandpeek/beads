@@ -138,7 +138,7 @@ func TestStaleSuite(t *testing.T) {
 
 	t.Run("StatusFilter", func(t *testing.T) {
 		// Filter: only in_progress
-		stale, err := s.GetStaleIssues(ctx, types.StaleFilter{Days: 30, Status: "in_progress", Limit: 50})
+		stale, err := s.GetStaleIssues(ctx, types.StaleFilter{Days: 30, Status: "working", Limit: 50})
 		if err != nil {
 			t.Fatalf("GetStaleIssues with status=in_progress failed: %v", err)
 		}

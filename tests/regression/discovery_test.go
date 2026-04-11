@@ -524,7 +524,7 @@ func TestProtocol_ClaimSemantics(t *testing.T) {
 	w.run("update", a, "--claim")
 
 	data := parseJSON(t, w.run("show", a, "--json"))
-	if data[0]["status"] != "in_progress" {
+	if data[0]["status"] != "working" {
 		t.Errorf("claimed issue should be in_progress, got: %v", data[0]["status"])
 	}
 
@@ -835,9 +835,9 @@ func TestProtocol_StatusTransitionRoundTrip(t *testing.T) {
 	a := w.create("--title", "Status lifecycle", "--type", "task", "--priority", "2")
 
 	// open → in_progress
-	w.run("update", a, "--status", "in_progress")
+	w.run("update", a, "--status", "working")
 	data := parseJSON(t, w.run("show", a, "--json"))
-	if data[0]["status"] != "in_progress" {
+	if data[0]["status"] != "working" {
 		t.Errorf("expected in_progress, got: %v", data[0]["status"])
 	}
 
@@ -1424,7 +1424,7 @@ func TestDiscovery_ClaimThenStatusOverwrite(t *testing.T) {
 	// If --status open overwrites it, that's a conflict the tool should catch.
 	if status == "open" {
 		t.Errorf("DISCOVERY: --claim set in_progress but --status open silently overwrote it — contradictory flags not detected")
-	} else if status != "in_progress" {
+	} else if status != "working" {
 		t.Errorf("unexpected status after --claim --status open: %v", status)
 	}
 }
@@ -1890,7 +1890,7 @@ func TestProtocol_CountByStatusSumMatchesTotal(t *testing.T) {
 	// Create issues in various states
 	w.create("--title", "Open1", "--type", "task", "--priority", "2")
 	inProgress := w.create("--title", "InProg", "--type", "task", "--priority", "2")
-	w.run("update", inProgress, "--status", "in_progress")
+	w.run("update", inProgress, "--status", "working")
 	closed := w.create("--title", "Closed1", "--type", "task", "--priority", "2")
 	w.run("close", closed)
 	deferred := w.create("--title", "Deferred1", "--type", "task", "--priority", "2")
@@ -2175,13 +2175,13 @@ func TestDiscovery_StatusInProgressNoAutoAssign(t *testing.T) {
 	a := w.create("--title", "Manual in_progress", "--type", "task", "--priority", "2")
 
 	// Set status to in_progress without --claim or --assignee
-	w.run("update", a, "--status", "in_progress")
+	w.run("update", a, "--status", "working")
 
 	data := parseJSON(t, w.run("show", a, "--json"))
 	status := data[0]["status"]
 	assignee := data[0]["assignee"]
 
-	if status != "in_progress" {
+	if status != "working" {
 		t.Fatalf("status should be in_progress, got %v", status)
 	}
 
@@ -2193,7 +2193,7 @@ func TestDiscovery_StatusInProgressNoAutoAssign(t *testing.T) {
 	bStatus := bData[0]["status"]
 	bAssignee := bData[0]["assignee"]
 
-	if bStatus != "in_progress" {
+	if bStatus != "working" {
 		t.Fatalf("claimed status should be in_progress, got %v", bStatus)
 	}
 

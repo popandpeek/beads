@@ -35,7 +35,7 @@ func TestProtocol_CloseUnblockedExitsZero(t *testing.T) {
 func TestProtocol_UpdateNonexistentExitsNonZero(t *testing.T) {
 	t.Parallel()
 	w := newWorkspace(t)
-	_, code := w.runExpectError("update", "nonexistent-xyz", "--status", "in_progress")
+	_, code := w.runExpectError("update", "nonexistent-xyz", "--status", "working")
 	if code != 1 {
 		t.Errorf("expected exit code 1, got %d", code)
 	}

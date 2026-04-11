@@ -18,7 +18,7 @@ type ClaimResult struct {
 }
 
 // ClaimIssueInTx atomically claims an issue using compare-and-swap semantics.
-// It sets the assignee to actor and status to "in_progress" only if the issue
+// It sets the assignee to actor and status to "working" only if the issue
 // currently has no assignee. Returns storage.ErrAlreadyClaimed if already
 // claimed by a different user. Idempotent: re-claiming by the same actor is
 // a no-op success (supports agent retry workflows).
@@ -41,7 +41,7 @@ func ClaimIssueInTx(ctx context.Context, tx *sql.Tx, id string, actor string) (*
 	// Conditional UPDATE: only succeeds if assignee is currently empty.
 	result, err := tx.ExecContext(ctx, fmt.Sprintf(`
 		UPDATE %s
-		SET assignee = ?, status = 'in_progress', updated_at = ?
+		SET assignee = ?, status = 'working', updated_at = ?
 		WHERE id = ? AND (assignee = '' OR assignee IS NULL)
 	`, issueTable), actor, now, id)
 	if err != nil {
@@ -74,7 +74,7 @@ func ClaimIssueInTx(ctx context.Context, tx *sql.Tx, id string, actor string) (*
 	oldData, _ := json.Marshal(oldIssue)
 	newUpdates := map[string]interface{}{
 		"assignee": actor,
-		"status":   "in_progress",
+		"status":   "working",
 	}
 	newData, _ := json.Marshal(newUpdates)
 

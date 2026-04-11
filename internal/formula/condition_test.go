@@ -174,7 +174,7 @@ func TestEvaluateCondition_Field(t *testing.T) {
 			},
 			"test": {
 				ID:     "test",
-				Status: "in_progress",
+				Status: "working",
 				Output: map[string]interface{}{
 					"errors": map[string]interface{}{
 						"count": float64(0),
@@ -252,7 +252,7 @@ func TestEvaluateCondition_Aggregate(t *testing.T) {
 		Steps: map[string]*StepState{
 			"parent": {
 				ID:     "parent",
-				Status: "in_progress",
+				Status: "working",
 				Children: []*StepState{
 					{ID: "child1", Status: "complete"},
 					{ID: "child2", Status: "complete"},
@@ -261,7 +261,7 @@ func TestEvaluateCondition_Aggregate(t *testing.T) {
 			},
 			"mixed": {
 				ID:     "mixed",
-				Status: "in_progress",
+				Status: "working",
 				Children: []*StepState{
 					{ID: "m1", Status: "complete"},
 					{ID: "m2", Status: "failed"},
@@ -442,7 +442,7 @@ func TestEvaluateCondition_EmptyChildren(t *testing.T) {
 		Steps: map[string]*StepState{
 			"parent": {
 				ID:       "parent",
-				Status:   "in_progress",
+				Status:   "working",
 				Children: []*StepState{}, // Empty children
 			},
 		},

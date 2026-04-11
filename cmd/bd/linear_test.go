@@ -210,13 +210,13 @@ func TestLinearStateToBeadsStatusCustomConfig(t *testing.T) {
 		StateMap: map[string]string{
 			"backlog":    "open",
 			"unstarted":  "open",
-			"started":    "in_progress",
+			"started":    "working",
 			"completed":  "closed",
 			"canceled":   "closed",
-			"in review":  "in_progress", // Custom state name (lowercase with space)
+			"in review":  "working", // Custom state name (lowercase with space)
 			"on hold":    "blocked",     // Custom state name (lowercase with space)
 			"blocked":    "blocked",     // Custom state name
-			"validating": "in_progress", // Custom state name
+			"validating": "working", // Custom state name
 		},
 	}
 
@@ -938,7 +938,7 @@ func TestParseBeadsStatus(t *testing.T) {
 	}{
 		{"open", types.StatusOpen},
 		{"OPEN", types.StatusOpen},
-		{"in_progress", types.StatusInProgress},
+		{"working", types.StatusInProgress},
 		{"in-progress", types.StatusInProgress},
 		{"inprogress", types.StatusInProgress},
 		{"blocked", types.StatusBlocked},
@@ -1000,7 +1000,7 @@ func TestDefaultLinearMappingConfig(t *testing.T) {
 
 	// Test state map has expected entries
 	expectedStateMap := map[string]string{
-		"backlog": "open", "unstarted": "open", "started": "in_progress",
+		"backlog": "open", "unstarted": "open", "started": "working",
 		"completed": "closed", "canceled": "closed",
 	}
 	for k, v := range expectedStateMap {
@@ -1560,7 +1560,7 @@ func TestBuildLinearToLocalUpdates(t *testing.T) {
 	if updates["priority"] != 1 { // High -> High
 		t.Errorf("expected priority 1, got %v", updates["priority"])
 	}
-	if updates["status"] != "in_progress" {
+	if updates["status"] != "working" {
 		t.Errorf("expected status 'in_progress', got %v", updates["status"])
 	}
 	if updates["assignee"] != "test@example.com" {

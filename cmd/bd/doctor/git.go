@@ -708,7 +708,7 @@ func FindOrphanedIssues(gitPath string, provider types.IssueProvider) ([]OrphanI
 	// Get issue prefix from provider
 	issuePrefix := provider.GetIssuePrefix()
 
-	// Get all open/in_progress issues from provider
+	// Get all open/working issues from provider
 	issues, err := provider.GetOpenIssues(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("getting open issues: %w", err)

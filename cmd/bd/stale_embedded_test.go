@@ -106,7 +106,7 @@ func TestEmbeddedStale(t *testing.T) {
 	// Create issues: some will be made stale, some will stay fresh.
 	stale1 := bdCreate(t, bd, dir, "Stale open issue", "--type", "task")
 	stale2 := bdCreate(t, bd, dir, "Stale in_progress issue", "--type", "task")
-	bdUpdate(t, bd, dir, stale2.ID, "--status", "in_progress")
+	bdUpdate(t, bd, dir, stale2.ID, "--status", "working")
 	stale3 := bdCreate(t, bd, dir, "Stale bug", "--type", "bug", "--assignee", "alice")
 	fresh1 := bdCreate(t, bd, dir, "Fresh issue", "--type", "task")
 	closedIssue := bdCreate(t, bd, dir, "Closed issue", "--type", "task")
@@ -152,7 +152,7 @@ func TestEmbeddedStale(t *testing.T) {
 	// ===== --status filter =====
 
 	t.Run("status_filter_in_progress", func(t *testing.T) {
-		entries := bdStaleJSON(t, bd, dir, "--status", "in_progress")
+		entries := bdStaleJSON(t, bd, dir, "--status", "working")
 		found := false
 		for _, e := range entries {
 			if e["id"] == stale2.ID {

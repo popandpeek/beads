@@ -6,7 +6,7 @@ import "context"
 // IssueProvider abstracts issue storage for orphan detection.
 // Implementations may be backed by Dolt or mocks.
 type IssueProvider interface {
-	// GetOpenIssues returns issues that are open or in_progress.
+	// GetOpenIssues returns issues that are open or working.
 	// Should return empty slice (not error) if no issues exist.
 	GetOpenIssues(ctx context.Context) ([]*Issue, error)
 

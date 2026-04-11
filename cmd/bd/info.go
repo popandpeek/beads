@@ -594,7 +594,7 @@ var versionChanges = []VersionChange{
 			"FIX: Atomic bd claim with compare-and-swap semantics",
 			"FIX: Dolt lock contention - advisory flock prevents zombie processes",
 			"FIX: Windows Dolt build via pure-Go regex backend",
-			"CHANGE: bd ready excludes in_progress issues (shows only claimable work)",
+			"CHANGE: bd ready excludes working issues (shows only claimable work)",
 		},
 	},
 	{
@@ -778,7 +778,7 @@ var versionChanges = []VersionChange{
 			"NEW: PRIME.md override - Custom prime output per project (GH#876)",
 			"NEW: Compound visualization - bd mol show displays compound structure (bd-iw4z)",
 			"NEW: /handoff skill - Session handoff slash command (bd-xwvo)",
-			"FIX: bd ready now shows in_progress issues (#894)",
+			"FIX: bd ready now shows working issues (#894)",
 			"FIX: macOS case-insensitive path handling for worktrees/daemon (GH#880)",
 			"FIX: Sync metadata timing - finalize after commit not push (GH#885)",
 			"FIX: Sparse checkout isolation - prevent config leak to main repo (GH#886)",

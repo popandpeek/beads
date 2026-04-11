@@ -31,7 +31,7 @@ type StepState struct {
 	// ID is the step identifier.
 	ID string
 
-	// Status is the step status: pending, in_progress, complete, failed.
+	// Status is the step status: pending, working, complete, failed.
 	Status string
 
 	// Output is the structured output from the step (if complete).
@@ -360,7 +360,7 @@ func (c *Condition) evaluateAggregate(ctx *ConditionContext) (*ConditionResult, 
 		count := 0
 		for _, s := range steps {
 			// For steps.complete pattern, field is the status to count
-			if c.AggregateOver == "steps" && (c.Field == "complete" || c.Field == "failed" || c.Field == "pending" || c.Field == "in_progress") {
+			if c.AggregateOver == "steps" && (c.Field == "complete" || c.Field == "failed" || c.Field == "pending" || c.Field == "working") {
 				if s.Status == c.Field {
 					count++
 				}

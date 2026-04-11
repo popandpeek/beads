@@ -22,12 +22,12 @@ func GetReadyWorkInTx(
 	filter types.WorkFilter,
 	computeBlockedFn func(ctx context.Context, tx *sql.Tx, includeWisps bool) ([]string, error),
 ) ([]*types.Issue, error) {
-	// Status filtering: default to open OR in_progress.
+	// Status filtering: default to open OR working.
 	var statusClause string
 	if filter.Status != "" {
 		statusClause = "status = ?"
 	} else {
-		statusClause = "status IN ('open', 'in_progress')"
+		statusClause = "status IN ('open', 'working')"
 	}
 	whereClauses := []string{
 		statusClause,

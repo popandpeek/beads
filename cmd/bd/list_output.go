@@ -41,7 +41,7 @@ func outputDotFormat(ctx context.Context, store storage.DoltStorage, issues []*t
 		case "closed":
 			fillColor = "lightgray"
 			fontColor = "dimgray"
-		case "in_progress":
+		case "working":
 			fillColor = "lightyellow"
 		case "blocked":
 			fillColor = "lightcoral"

@@ -270,7 +270,7 @@ var PriorityMapping = map[string]int{
 // Exported so DefaultMappingConfig in mapping.go can use it.
 var StatusMapping = map[string]string{
 	"open":        "open",
-	"in_progress": "in_progress",
+	"in_progress": "working",
 	"blocked":     "blocked",
 	"deferred":    "deferred",
 	"closed":      "closed",

@@ -20,7 +20,7 @@ var readyCmd = &cobra.Command{
 	Short: "Show ready work (open, no active blockers)",
 	Long: `Show ready work (open issues with no active blockers).
 
-Excludes in_progress, blocked, deferred, and hooked issues. This uses the
+Excludes working, blocked, deferred, and hooked issues. This uses the
 GetReadyWork API which applies blocker-aware semantics to find truly claimable work.
 
 Note: 'bd list --ready' is NOT equivalent - it only filters by status=open.
@@ -101,7 +101,7 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			}
 		}
 		filter := types.WorkFilter{
-			Status:           "open", // Only show open issues, not in_progress (matches bd list --ready)
+			Status:           "open", // Only show open issues, not working (matches bd list --ready)
 			Type:             issueType,
 			Limit:            limit,
 			Unassigned:       unassigned,
@@ -400,7 +400,7 @@ func displayReadyList(issues []*types.Issue, parentEpicMap map[string]string) {
 	fmt.Println(strings.Repeat("-", 80))
 	fmt.Printf("Ready: %d issues with no active blockers\n", len(issues))
 	fmt.Println()
-	fmt.Println("Status: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred")
+	fmt.Println("Status: ○ open  ◐ working  ● blocked  ✓ closed  ❄ deferred")
 }
 
 // runReadyExplain shows dependency-aware reasoning for why issues are ready or blocked.

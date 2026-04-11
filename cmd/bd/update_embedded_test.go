@@ -135,7 +135,7 @@ func TestEmbeddedUpdate(t *testing.T) {
 
 	t.Run("update_status", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "Status test", "--type", "task")
-		bdUpdate(t, bd, dir, issue.ID, "--status", "in_progress")
+		bdUpdate(t, bd, dir, issue.ID, "--status", "working")
 		got := bdShow(t, bd, dir, issue.ID)
 		if got.Status != types.StatusInProgress {
 			t.Errorf("expected status in_progress, got %s", got.Status)
@@ -308,7 +308,7 @@ func TestEmbeddedUpdate(t *testing.T) {
 
 	t.Run("update_multiple_fields", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "Multi update", "--type", "task")
-		bdUpdate(t, bd, dir, issue.ID, "--status", "in_progress", "--assignee", "bob", "--priority", "1")
+		bdUpdate(t, bd, dir, issue.ID, "--status", "working", "--assignee", "bob", "--priority", "1")
 		got := bdShow(t, bd, dir, issue.ID)
 		if got.Status != types.StatusInProgress {
 			t.Errorf("expected status in_progress, got %s", got.Status)
@@ -641,7 +641,7 @@ func TestEmbeddedUpdate(t *testing.T) {
 
 	t.Run("update_json_output", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "JSON test", "--type", "task")
-		cmd := exec.Command(bd, "update", issue.ID, "--status", "in_progress", "--json")
+		cmd := exec.Command(bd, "update", issue.ID, "--status", "working", "--json")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
 		out, err := cmd.CombinedOutput()
@@ -664,7 +664,7 @@ func TestEmbeddedUpdate(t *testing.T) {
 	t.Run("update_multiple_ids", func(t *testing.T) {
 		issue1 := bdCreate(t, bd, dir, "Multi ID 1", "--type", "task")
 		issue2 := bdCreate(t, bd, dir, "Multi ID 2", "--type", "task")
-		bdUpdate(t, bd, dir, issue1.ID, issue2.ID, "--status", "in_progress")
+		bdUpdate(t, bd, dir, issue1.ID, issue2.ID, "--status", "working")
 		got1 := bdShow(t, bd, dir, issue1.ID)
 		got2 := bdShow(t, bd, dir, issue2.ID)
 		if got1.Status != types.StatusInProgress {
@@ -677,7 +677,7 @@ func TestEmbeddedUpdate(t *testing.T) {
 
 	t.Run("update_dolt_commit", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "Dolt commit test", "--type", "task")
-		bdUpdate(t, bd, dir, issue.ID, "--status", "in_progress")
+		bdUpdate(t, bd, dir, issue.ID, "--status", "working")
 
 		// Verify a Dolt commit exists by querying dolt_log.
 		dataDir := filepath.Join(beadsDir, "embeddeddolt")
@@ -779,7 +779,7 @@ func TestEmbeddedUpdateConcurrent(t *testing.T) {
 				r.ids = append(r.ids, id)
 
 				// Update: change status to in_progress.
-				uCmd := exec.Command(bd, "update", id, "--status", "in_progress")
+				uCmd := exec.Command(bd, "update", id, "--status", "working")
 				uCmd.Dir = dir
 				uCmd.Env = bdEnv(dir)
 				uOut, err := uCmd.CombinedOutput()

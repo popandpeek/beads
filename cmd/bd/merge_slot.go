@@ -24,7 +24,7 @@ and create cascading conflicts.
 Each rig has one merge slot bead: <prefix>-merge-slot (labeled gt:slot).
 The slot uses:
   - status=open: slot is available
-  - status=in_progress: slot is held
+  - status=working: slot is held
   - metadata.holder: who currently holds the slot
   - metadata.waiters: priority-ordered queue of waiters
 
@@ -65,10 +65,10 @@ var mergeSlotAcquireCmd = &cobra.Command{
 	Long: `Attempt to acquire the merge slot for exclusive access.
 
 If the slot is available (status=open), it will be acquired:
-  - status set to in_progress
+  - status set to working
   - holder set to the requester
 
-If the slot is held (status=in_progress), the command fails unless
+If the slot is held (status=working), the command fails unless
 --wait is passed, which adds the requester to the waiters queue.
 
 Use --holder to specify who is acquiring (default: BEADS_ACTOR env var).`,

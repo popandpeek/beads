@@ -503,8 +503,8 @@ func TestGitRemoteRoundTripAllTables(t *testing.T) {
 	if rows[0]["title"] != "Child Task" {
 		t.Errorf("clone: child title = %q, want %q", rows[0]["title"], "Child Task")
 	}
-	if rows[0]["status"] != "in_progress" {
-		t.Errorf("clone: child status = %q, want %q", rows[0]["status"], "in_progress")
+	if rows[0]["status"] != "working" {
+		t.Errorf("clone: child status = %q, want %q", rows[0]["status"], "working")
 	}
 	if rows[0]["assignee"] != "alice" {
 		t.Errorf("clone: child assignee = %q, want %q", rows[0]["assignee"], "alice")

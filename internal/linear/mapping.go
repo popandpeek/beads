@@ -155,7 +155,7 @@ func DefaultMappingConfig() *MappingConfig {
 		StateMap: map[string]string{
 			"backlog":   "open",
 			"unstarted": "open",
-			"started":   "in_progress",
+			"started":   "working",
 			"completed": "closed",
 			"canceled":  "closed",
 		},
@@ -191,7 +191,7 @@ type ConfigLoader interface {
 // Examples:
 //
 //	linear.priority_map.0 = 4       (Linear "no priority" -> Beads backlog)
-//	linear.state_map.started = in_progress
+//	linear.state_map.started = working
 //	linear.label_type_map.bug = bug
 //	linear.relation_map.blocks = blocks
 func LoadMappingConfig(loader ConfigLoader) *MappingConfig {

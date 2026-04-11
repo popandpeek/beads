@@ -324,18 +324,25 @@ type Status string
 // Issue status constants
 const (
 	StatusOpen       Status = "open"
-	StatusInProgress Status = "in_progress"
+	StatusWorking    Status = "working"   // GASTOWN-CUSTOM: renamed from working for Gas Town Kanban workflow
+	StatusPlanning   Status = "planning"  // GASTOWN-CUSTOM: added for Gas Town Kanban workflow
+	StatusReviewing  Status = "reviewing" // GASTOWN-CUSTOM: added for Gas Town Kanban workflow
+	StatusDeploying  Status = "deploying" // GASTOWN-CUSTOM: added for Gas Town Kanban workflow
 	StatusBlocked    Status = "blocked"
 	StatusDeferred   Status = "deferred" // Deliberately put on ice for later
 	StatusClosed     Status = "closed"
 	StatusPinned     Status = "pinned" // Persistent bead that stays open indefinitely
 	StatusHooked     Status = "hooked" // Work actively claimed by a worker
+
+	// StatusInProgress is a deprecated alias for StatusWorking.
+	// GASTOWN-CUSTOM: kept for backward compatibility during transition
+	StatusInProgress = StatusWorking
 )
 
 // IsValid checks if the status value is valid (built-in statuses only)
 func (s Status) IsValid() bool {
 	switch s {
-	case StatusOpen, StatusInProgress, StatusBlocked, StatusDeferred, StatusClosed, StatusPinned, StatusHooked:
+	case StatusOpen, StatusWorking, StatusPlanning, StatusReviewing, StatusDeploying, StatusBlocked, StatusDeferred, StatusClosed, StatusPinned, StatusHooked: // GASTOWN-CUSTOM: added planning, reviewing, deploying
 		return true
 	}
 	return false
@@ -408,9 +415,10 @@ var statusNameRegexp = regexp.MustCompile(`^[a-z][a-z0-9_-]*$`)
 const maxCustomStatuses = 50
 
 // builtInStatusNames contains all built-in status names in lowercase for collision detection.
+// GASTOWN-CUSTOM: added working, planning, reviewing, deploying
 var builtInStatusNames = map[string]bool{
-	"open": true, "in_progress": true, "blocked": true,
-	"deferred": true, "closed": true, "pinned": true, "hooked": true,
+	"open": true, "working": true, "planning": true, "reviewing": true, "deploying": true,
+	"blocked": true, "deferred": true, "closed": true, "pinned": true, "hooked": true,
 }
 
 // ParseCustomStatusConfig parses a status.custom config value into typed CustomStatus entries.
@@ -503,7 +511,7 @@ func BuiltInStatusCategory(status Status) StatusCategory {
 	switch status {
 	case StatusOpen:
 		return CategoryActive
-	case StatusInProgress, StatusBlocked, StatusHooked:
+	case StatusWorking, StatusPlanning, StatusReviewing, StatusDeploying, StatusBlocked, StatusHooked: // GASTOWN-CUSTOM: added planning, reviewing, deploying
 		return CategoryWIP
 	case StatusClosed:
 		return CategoryDone
@@ -1107,8 +1115,8 @@ type MoleculeProgressStats struct {
 	MoleculeTitle string     `json:"molecule_title"`
 	Total         int        `json:"total"`           // Total steps (direct children)
 	Completed     int        `json:"completed"`       // Closed steps
-	InProgress    int        `json:"in_progress"`     // Steps currently in progress
-	CurrentStepID string     `json:"current_step_id"` // First in_progress step ID (if any)
+	InProgress    int        `json:"working"`     // Steps currently in progress
+	CurrentStepID string     `json:"current_step_id"` // First working step ID (if any)
 	FirstClosed   *time.Time `json:"first_closed,omitempty"`
 	LastClosed    *time.Time `json:"last_closed,omitempty"`
 }
@@ -1295,7 +1303,7 @@ type WorkFilter struct {
 // StaleFilter is used to filter stale issue queries
 type StaleFilter struct {
 	Days   int    // Issues not updated in this many days
-	Status string // Filter by status (open|in_progress|blocked), empty = all non-closed
+	Status string // Filter by status (open|working|blocked), empty = all non-closed
 	Limit  int    // Maximum issues to return
 }
 
@@ -1308,7 +1316,7 @@ type WispFilter struct {
 	Type *IssueType
 
 	// Status filters by issue status.
-	// nil = non-closed only (open, in_progress, blocked).
+	// nil = non-closed only (open, working, blocked).
 	Status *Status
 
 	// UpdatedAfter excludes wisps last updated before this time.

@@ -348,7 +348,7 @@ locally but not synced via git.
 The list shows:
   - ID: Issue ID of the wisp
   - Title: Wisp title
-  - Status: Current status (open, in_progress, closed)
+  - Status: Current status (open, working, closed)
   - Started: When the wisp was created
   - Updated: Last modification time
 

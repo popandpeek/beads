@@ -233,7 +233,7 @@ var PriorityMapping = map[string]int{
 // This is the single source of truth for status mappings.
 var StatusMapping = map[string]string{
 	"open":        "open",
-	"in_progress": "in_progress",
+	"in_progress": "working",
 	"blocked":     "blocked",
 	"deferred":    "deferred",
 	"closed":      "closed",

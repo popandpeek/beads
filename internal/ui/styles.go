@@ -293,7 +293,7 @@ func RenderStatusIcon(status string) string {
 	switch status {
 	case "open":
 		return StatusIconOpen // no color - available but not urgent
-	case "in_progress":
+	case "working":
 		return StatusInProgressStyle.Render(StatusIconInProgress)
 	case "blocked":
 		return StatusBlockedStyle.Render(StatusIconBlocked)
@@ -315,7 +315,7 @@ func RenderStatusIconWithCategory(status string, category types.StatusCategory) 
 	switch status {
 	case "open":
 		return StatusIconOpen
-	case "in_progress":
+	case "working":
 		return StatusInProgressStyle.Render(StatusIconInProgress)
 	case "blocked":
 		return StatusBlockedStyle.Render(StatusIconBlocked)
@@ -347,7 +347,7 @@ func GetStatusIcon(status string) string {
 	switch status {
 	case "open":
 		return StatusIconOpen
-	case "in_progress":
+	case "working":
 		return StatusIconInProgress
 	case "blocked":
 		return StatusIconBlocked
@@ -367,7 +367,7 @@ func GetStatusIconWithCategory(status string, category types.StatusCategory) str
 	switch status {
 	case "open":
 		return StatusIconOpen
-	case "in_progress":
+	case "working":
 		return StatusIconInProgress
 	case "blocked":
 		return StatusIconBlocked
@@ -394,10 +394,10 @@ func GetStatusIconWithCategory(status string, category types.StatusCategory) str
 
 // GetStatusStyle returns the lipgloss style for a given status
 // Use this when you need to apply the semantic color to custom text
-// Example: ui.GetStatusStyle("in_progress").Render(myCustomText)
+// Example: ui.GetStatusStyle("working").Render(myCustomText)
 func GetStatusStyle(status string) lipgloss.Style {
 	switch status {
-	case "in_progress":
+	case "working":
 		return StatusInProgressStyle
 	case "blocked":
 		return StatusBlockedStyle
@@ -495,10 +495,10 @@ func RenderID(id string) string {
 }
 
 // RenderStatus renders a status with semantic styling
-// in_progress/blocked/pinned get color; open/closed use standard text
+// working/blocked/pinned get color; open/closed use standard text
 func RenderStatus(status string) string {
 	switch status {
-	case "in_progress":
+	case "working":
 		return StatusInProgressStyle.Render(status)
 	case "blocked":
 		return StatusBlockedStyle.Render(status)

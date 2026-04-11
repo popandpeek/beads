@@ -259,7 +259,7 @@ func analyzeMoleculeParallel(subgraph *MoleculeSubgraph) *ParallelAnalysis {
 			info.Blocks = append(info.Blocks, blockedID)
 		}
 
-		// A step is ready if it's open/in_progress and has no open blockers
+		// A step is ready if it's open/working and has no open blockers
 		info.IsReady = (issue.Status == types.StatusOpen || issue.Status == types.StatusInProgress) &&
 			len(info.BlockedBy) == 0
 
@@ -526,7 +526,7 @@ func getParallelAnnotation(info *ParallelInfo) string {
 			parts = append(parts, ui.RenderFail("blocked"))
 		}
 	case string(types.StatusInProgress):
-		parts = append(parts, ui.RenderWarn("in_progress"))
+		parts = append(parts, ui.RenderWarn("working"))
 	case string(types.StatusClosed):
 		parts = append(parts, ui.RenderPass("completed"))
 	}

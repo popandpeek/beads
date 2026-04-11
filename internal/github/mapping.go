@@ -69,7 +69,7 @@ func statusFromLabelsAndState(labels []string, state string, config *MappingConf
 		if prefix == "status" {
 			normalized := strings.ToLower(value)
 			if normalized == "in_progress" {
-				return "in_progress"
+				return "working"
 			}
 			if normalized == "blocked" {
 				return "blocked"

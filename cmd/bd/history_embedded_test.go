@@ -74,7 +74,7 @@ func TestEmbeddedHistory(t *testing.T) {
 
 	// Create an issue, then modify it several times to build history.
 	issue := bdCreate(t, bd, dir, "History test issue", "--type", "task", "--priority", "3")
-	bdUpdate(t, bd, dir, issue.ID, "--status", "in_progress")
+	bdUpdate(t, bd, dir, issue.ID, "--status", "working")
 	bdUpdate(t, bd, dir, issue.ID, "--priority", "1")
 	bdUpdate(t, bd, dir, issue.ID, "--title", "History test issue updated")
 

@@ -45,10 +45,10 @@ Data Mapping (optional, sensible defaults provided):
   State mapping (Linear state type to Beads status):
     bd config set linear.state_map.backlog open
     bd config set linear.state_map.unstarted open
-    bd config set linear.state_map.started in_progress
+    bd config set linear.state_map.started working
     bd config set linear.state_map.completed closed
     bd config set linear.state_map.canceled closed
-    bd config set linear.state_map.my_custom_state in_progress  # Custom state names
+    bd config set linear.state_map.my_custom_state working  # Custom state names
 
   Label to issue type mapping:
     bd config set linear.label_type_map.bug bug

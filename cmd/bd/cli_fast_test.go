@@ -285,12 +285,12 @@ func TestCLI_Update(t *testing.T) {
 	json.Unmarshal([]byte(out), &issue)
 	id := issue["id"].(string)
 
-	runBDInProcess(t, tmpDir, "update", id, "--status", "in_progress")
+	runBDInProcess(t, tmpDir, "update", id, "--status", "working")
 
 	out = runBDInProcess(t, tmpDir, "show", id, "--json")
 	var updated []map[string]interface{}
 	json.Unmarshal([]byte(out), &updated)
-	if updated[0]["status"] != "in_progress" {
+	if updated[0]["status"] != "working" {
 		t.Errorf("Expected status 'in_progress', got: %v", updated[0]["status"])
 	}
 }
@@ -834,7 +834,7 @@ func TestCLI_EndToEnd(t *testing.T) {
 	json.Unmarshal([]byte(out[jsonStart:]), &issue)
 	id := issue["id"].(string)
 
-	runBDExec(t, tmpDir, "update", id, "--status", "in_progress")
+	runBDExec(t, tmpDir, "update", id, "--status", "working")
 	runBDExec(t, tmpDir, "close", id, "--reason", "Done")
 
 	out = runBDExec(t, tmpDir, "show", id, "--json")

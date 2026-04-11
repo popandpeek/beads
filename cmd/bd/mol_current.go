@@ -34,7 +34,7 @@ type MoleculeProgress struct {
 type StepStatus struct {
 	Issue     *types.Issue `json:"issue"`
 	Status    string       `json:"status"`     // "done", "current", "ready", "blocked", "pending"
-	IsCurrent bool         `json:"is_current"` // true if this is the in_progress step
+	IsCurrent bool         `json:"is_current"` // true if this is the working step
 }
 
 var molCurrentCmd = &cobra.Command{
@@ -43,11 +43,11 @@ var molCurrentCmd = &cobra.Command{
 	Long: `Show where you are in a molecule workflow.
 
 If molecule-id is given, show status for that molecule.
-If not given, infer from in_progress issues assigned to current agent.
+If not given, infer from working issues assigned to current agent.
 
 The output shows all steps with status indicators:
   [done]     - Step is complete (closed)
-  [current]  - Step is in_progress (you are here)
+  [current]  - Step is working (you are here)
   [ready]    - Step is ready to start (unblocked)
   [blocked]  - Step is blocked by dependencies
   [pending]  - Step is waiting
@@ -121,7 +121,7 @@ Use --limit or --range to view specific steps:
 
 			molecules = append(molecules, progress)
 		} else {
-			// Infer from in_progress issues
+			// Infer from working issues
 			molecules = findInProgressMolecules(ctx, store, agent)
 
 			// Fallback: check for hooked issues with bonded molecules
@@ -240,7 +240,7 @@ func getMoleculeProgress(ctx context.Context, s storage.DoltStorage, moleculeID 
 	return progress, nil
 }
 
-// findInProgressMolecules finds molecules with in_progress steps for an agent
+// findInProgressMolecules finds molecules with working steps for an agent
 func findInProgressMolecules(ctx context.Context, s storage.DoltStorage, agent string) []*MoleculeProgress {
 	var inProgressIssues []*types.Issue
 
@@ -258,7 +258,7 @@ func findInProgressMolecules(ctx context.Context, s storage.DoltStorage, agent s
 		return nil
 	}
 
-	// Batch-find parent molecules for all in_progress issues (bd-hn4q)
+	// Batch-find parent molecules for all working issues (bd-hn4q)
 	issueIDs := make([]string, len(inProgressIssues))
 	for i, issue := range inProgressIssues {
 		issueIDs[i] = issue.ID
@@ -295,7 +295,7 @@ func findInProgressMolecules(ctx context.Context, s storage.DoltStorage, agent s
 }
 
 // findHookedMolecules finds molecules bonded to hooked issues for an agent.
-// This is a fallback when no in_progress steps exist but a molecule is attached
+// This is a fallback when no working steps exist but a molecule is attached
 // to the agent's hooked work via a "blocks" dependency.
 func findHookedMolecules(ctx context.Context, s storage.DoltStorage, agent string) []*MoleculeProgress {
 	// Query for hooked issues assigned to the agent
@@ -581,7 +581,7 @@ type ContinueResult struct {
 }
 
 // AdvanceToNextStep finds the next ready step in a molecule after closing a step.
-// If autoClaim is true, it marks the next step as in_progress using optimistic
+// If autoClaim is true, it marks the next step as working using optimistic
 // concurrency control: the step's status is re-verified inside a transaction to
 // guard against TOCTOU races where multiple agents identify and try to claim the
 // same step concurrently.
@@ -693,7 +693,7 @@ func PrintContinueResult(result *ContinueResult) {
 	fmt.Printf("  %s: %s\n", result.NextStep.ID, result.NextStep.Title)
 
 	if result.AutoAdvanced {
-		fmt.Printf("\n%s Marked in_progress (use --no-auto to skip)\n", ui.RenderWarn("→"))
+		fmt.Printf("\n%s Marked working (use --no-auto to skip)\n", ui.RenderWarn("→"))
 	} else {
 		fmt.Printf("\nStart with: bd update %s --claim\n", result.NextStep.ID)
 	}

@@ -361,7 +361,7 @@ func printHumanStats(issues []*types.Issue) {
 				dismissed++
 			}
 		default:
-			// All non-closed statuses (open, in_progress, blocked, hooked, etc.) are pending
+			// All non-closed statuses (open, working, blocked, hooked, etc.) are pending
 			pending++
 		}
 	}

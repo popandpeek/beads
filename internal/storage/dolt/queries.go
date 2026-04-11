@@ -34,12 +34,12 @@ func (s *DoltStore) GetReadyWork(ctx context.Context, filter types.WorkFilter) (
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	// Status filtering: default to open OR in_progress (matches memory storage)
+	// Status filtering: default to open OR working (matches memory storage)
 	var statusClause string
 	if filter.Status != "" {
 		statusClause = "status = ?"
 	} else {
-		statusClause = "status IN ('open', 'in_progress')"
+		statusClause = "status IN ('open', 'working')"
 	}
 	whereClauses := []string{
 		statusClause,

@@ -32,7 +32,7 @@ var statusCmd = &cobra.Command{
 	Short:   "Show issue database overview and statistics",
 	Long: `Show a quick snapshot of the issue database state and statistics.
 
-This command provides a summary of issue counts by state (open, in_progress,
+This command provides a summary of issue counts by state (open, working,
 blocked, closed), ready work, extended statistics (pinned issues,
 average lead time), and recent activity over the last 24 hours from git history.
 

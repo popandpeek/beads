@@ -189,7 +189,7 @@ func (s *DoltStore) UpdateIssue(ctx context.Context, id string, updates map[stri
 }
 
 // ClaimIssue atomically claims an issue using compare-and-swap semantics.
-// It sets the assignee to actor and status to "in_progress" only if the issue
+// It sets the assignee to actor and status to "working" only if the issue
 // currently has no assignee. Returns storage.ErrAlreadyClaimed if already claimed.
 // Delegates SQL work to issueops.ClaimIssueInTx; handles Dolt-specific concerns
 // (wisp routing, DOLT_ADD/COMMIT, cache invalidation).
@@ -224,7 +224,7 @@ func (s *DoltStore) ClaimIssue(ctx context.Context, id string, actor string) err
 	if err := tx.Commit(); err != nil {
 		return wrapTransactionError("commit claim issue", err)
 	}
-	// Claiming changes status to in_progress, affecting blocked ID computation
+	// Claiming changes status to working, affecting blocked ID computation
 	s.invalidateBlockedIDsCache()
 	return nil
 }

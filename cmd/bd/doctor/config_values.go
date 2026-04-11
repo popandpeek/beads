@@ -419,7 +419,7 @@ func checkDatabaseConfigValuesWithStore(store *dolt.DoltStore) []string {
 			}
 			// Check for conflicts with built-in statuses
 			switch status {
-			case "open", "in_progress", "blocked", "closed":
+			case "open", "working", "blocked", "closed":
 				issues = append(issues, fmt.Sprintf("status.custom: %q conflicts with built-in status", status))
 			}
 		}

@@ -113,7 +113,7 @@ func TestEmbeddedDiff(t *testing.T) {
 
 	t.Run("diff_added_modified_removed", func(t *testing.T) {
 		// Modify issue1
-		bdUpdate(t, bd, dir, issue1.ID, "--status", "in_progress")
+		bdUpdate(t, bd, dir, issue1.ID, "--status", "working")
 
 		// Delete issue2
 		bdDelete(t, bd, dir, issue2.ID, "--force")

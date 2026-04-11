@@ -294,7 +294,7 @@ func TestEmbeddedShow(t *testing.T) {
 
 	t.Run("show_current_with_in_progress", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "In progress for current", "--type", "task")
-		bdUpdate(t, bd, dir, issue.ID, "--status", "in_progress", "--assignee", "test@test.com")
+		bdUpdate(t, bd, dir, issue.ID, "--status", "working", "--assignee", "test@test.com")
 
 		out := bdShowRaw(t, bd, dir, "--current")
 		if !strings.Contains(out, "In progress for current") {

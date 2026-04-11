@@ -223,8 +223,8 @@ func TestConstants(t *testing.T) {
 	if beads.StatusOpen != "open" {
 		t.Errorf("StatusOpen = %q, want %q", beads.StatusOpen, "open")
 	}
-	if beads.StatusInProgress != "in_progress" {
-		t.Errorf("StatusInProgress = %q, want %q", beads.StatusInProgress, "in_progress")
+	if beads.StatusInProgress != "working" {
+		t.Errorf("StatusInProgress = %q, want %q", beads.StatusInProgress, "working")
 	}
 	if beads.StatusBlocked != "blocked" {
 		t.Errorf("StatusBlocked = %q, want %q", beads.StatusBlocked, "blocked")

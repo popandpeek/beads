@@ -80,7 +80,7 @@ func statusFromLabelsAndState(labels []string, state string, config *MappingConf
 			case "open":
 				return "open"
 			case "in_progress":
-				return "in_progress"
+				return "working"
 			case "blocked":
 				return "blocked"
 			case "deferred":

@@ -150,7 +150,7 @@ func StatusIcon(status string) string {
 	switch status {
 	case "open":
 		return "○"
-	case "in_progress":
+	case "working":
 		return "◐"
 	case "blocked":
 		return "●"

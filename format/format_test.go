@@ -13,7 +13,7 @@ func TestStatusIcon(t *testing.T) {
 		want   string
 	}{
 		{"open", "○"},
-		{"in_progress", "◐"},
+		{"working", "◐"},
 		{"blocked", "●"},
 		{"closed", "✓"},
 		{"deferred", "❄"},

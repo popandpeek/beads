@@ -432,7 +432,7 @@ var listCmd = &cobra.Command{
 			Limit: sqlLimit,
 		}
 
-		// --ready flag: show only open issues (excludes hooked/in_progress/blocked/deferred) (bd-ihu31)
+		// --ready flag: show only open issues (excludes hooked/working/blocked/deferred) (bd-ihu31)
 		if readyFlag {
 			s := types.StatusOpen
 			filter.Status = &s
@@ -447,7 +447,7 @@ var listCmd = &cobra.Command{
 			if len(statusParts) == 1 {
 				s := types.Status(strings.TrimSpace(statusParts[0]))
 				if !s.IsValidWithCustom(customStatuses) {
-					validList := "open, in_progress, blocked, deferred, closed, pinned, hooked"
+					validList := "open, working, blocked, deferred, closed, pinned, hooked"
 					if len(customStatuses) > 0 {
 						validList += ", " + strings.Join(customStatuses, ", ")
 					}
@@ -458,7 +458,7 @@ var listCmd = &cobra.Command{
 				for _, part := range statusParts {
 					s := types.Status(strings.TrimSpace(part))
 					if !s.IsValidWithCustom(customStatuses) {
-						validList := "open, in_progress, blocked, deferred, closed, pinned, hooked"
+						validList := "open, working, blocked, deferred, closed, pinned, hooked"
 						if len(customStatuses) > 0 {
 							validList += ", " + strings.Join(customStatuses, ", ")
 						}
@@ -952,7 +952,7 @@ var listCmd = &cobra.Command{
 }
 
 func init() {
-	listCmd.Flags().StringP("status", "s", "", "Filter by stored status (open, in_progress, blocked, deferred, closed). Comma-separated for multiple: --status open,in_progress")
+	listCmd.Flags().StringP("status", "s", "", "Filter by stored status (open, working, blocked, deferred, closed). Comma-separated for multiple: --status open,working")
 	listCmd.Flags().String("state", "", "Alias for --status")
 	_ = listCmd.Flags().MarkHidden("state")
 	registerPriorityFlag(listCmd, "")
@@ -1044,7 +1044,7 @@ func init() {
 	listCmd.Flags().Bool("no-pager", false, "Disable pager output")
 
 	// Ready filter: show only issues ready to be worked on (bd-ihu31)
-	listCmd.Flags().Bool("ready", false, "Show only ready issues (status=open, excludes hooked/in_progress/blocked/deferred)")
+	listCmd.Flags().Bool("ready", false, "Show only ready issues (status=open, excludes hooked/working/blocked/deferred)")
 
 	// Note: --json flag is defined as a persistent flag in main.go, not here
 	rootCmd.AddCommand(listCmd)

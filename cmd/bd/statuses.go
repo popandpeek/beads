@@ -17,7 +17,10 @@ var builtInStatuses = []struct {
 	Description string
 }{
 	{types.StatusOpen, types.CategoryActive, "Available to work (default)"},
-	{types.StatusInProgress, types.CategoryWIP, "Actively being worked on"},
+	{types.StatusWorking, types.CategoryWIP, "Actively being worked on"},
+	{types.StatusPlanning, types.CategoryWIP, "Being researched or refined"},       // GASTOWN-CUSTOM
+	{types.StatusReviewing, types.CategoryWIP, "In code review (PR created)"},      // GASTOWN-CUSTOM
+	{types.StatusDeploying, types.CategoryWIP, "Merged to release, awaiting main"}, // GASTOWN-CUSTOM
 	{types.StatusBlocked, types.CategoryWIP, "Blocked by a dependency"},
 	{types.StatusDeferred, types.CategoryFrozen, "Deliberately put on ice for later"},
 	{types.StatusClosed, types.CategoryDone, "Completed"},
@@ -31,7 +34,7 @@ var statusesCmd = &cobra.Command{
 	Short:   "List valid issue statuses",
 	Long: `List all valid issue statuses and their categories.
 
-Built-in statuses (open, in_progress, blocked, etc.) are always valid.
+Built-in statuses (open, working, blocked, etc.) are always valid.
 Additional statuses can be configured via status.custom:
 
   bd config set status.custom "in_review:active,qa_testing:wip,on_hold:frozen"

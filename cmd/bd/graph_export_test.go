@@ -196,7 +196,7 @@ func TestRenderGraphHTML(t *testing.T) {
 	if !strings.Contains(output, "open") {
 		t.Error("HTML should contain open status")
 	}
-	if !strings.Contains(output, "in_progress") {
+	if !strings.Contains(output, "working") {
 		t.Error("HTML should contain in_progress status")
 	}
 
@@ -227,7 +227,7 @@ func TestBuildHTMLGraphData(t *testing.T) {
 			if n.Assignee != "alice" {
 				t.Errorf("test-b assignee = %q, want 'alice'", n.Assignee)
 			}
-			if n.Status != "in_progress" {
+			if n.Status != "working" {
 				t.Errorf("test-b status = %q, want 'in_progress'", n.Status)
 			}
 		}

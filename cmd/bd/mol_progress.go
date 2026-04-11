@@ -47,7 +47,7 @@ Example:
 			}
 			moleculeID = resolved
 		} else {
-			// Infer from in_progress work - use lightweight discovery
+			// Infer from working work - use lightweight discovery
 			moleculeIDs := findInProgressMoleculeIDs(ctx, store, actor)
 			if len(moleculeIDs) == 0 {
 				if jsonOutput {
@@ -74,7 +74,7 @@ Example:
 				"molecule_title":  stats.MoleculeTitle,
 				"total":           stats.Total,
 				"completed":       stats.Completed,
-				"in_progress":     stats.InProgress,
+				"working":     stats.InProgress,
 				"current_step_id": stats.CurrentStepID,
 			}
 			if stats.Total > 0 {
@@ -101,10 +101,10 @@ Example:
 	},
 }
 
-// findInProgressMoleculeIDs finds molecule IDs with in_progress steps for an agent.
+// findInProgressMoleculeIDs finds molecule IDs with working steps for an agent.
 // This is a lightweight version that only returns IDs without loading subgraphs.
 func findInProgressMoleculeIDs(ctx context.Context, s storage.DoltStorage, agent string) []string {
-	// Query for in_progress issues
+	// Query for working issues
 	status := types.StatusInProgress
 	filter := types.IssueFilter{Status: &status}
 	if agent != "" {
@@ -115,7 +115,7 @@ func findInProgressMoleculeIDs(ctx context.Context, s storage.DoltStorage, agent
 		return nil
 	}
 
-	// Batch-find parent molecules for all in_progress issues (bd-hn4q)
+	// Batch-find parent molecules for all working issues (bd-hn4q)
 	issueIDs := make([]string, len(inProgressIssues))
 	for i, issue := range inProgressIssues {
 		issueIDs[i] = issue.ID

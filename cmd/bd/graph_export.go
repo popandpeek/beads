@@ -256,7 +256,7 @@ svg { width: 100vw; height: 100vh; display: block; }
 <script>
 const nodes = %s;
 const links = %s;
-const statusColors = { open:"#4a9eff", in_progress:"#f0ad4e", blocked:"#d9534f", closed:"#5cb85c", deferred:"#777", hooked:"#9966cc" };
+const statusColors = { open:"#4a9eff", working:"#f0ad4e", blocked:"#d9534f", closed:"#5cb85c", deferred:"#777", hooked:"#9966cc" };
 const width = window.innerWidth, height = window.innerHeight;
 let showLabels = true;
 

@@ -11,14 +11,14 @@ import (
 
 // GetStaleIssuesInTx returns issues that haven't been updated within the
 // given number of days. Only non-ephemeral issues are considered. When
-// filter.Status is empty, open and in_progress issues are returned.
+// filter.Status is empty, open and working issues are returned.
 // Results are ordered by updated_at ascending (stalest first).
 //
 // nolint:gosec // G201: statusClause contains only literal SQL or a single ? placeholder
 func GetStaleIssuesInTx(ctx context.Context, tx *sql.Tx, filter types.StaleFilter) ([]*types.Issue, error) {
 	cutoff := time.Now().UTC().AddDate(0, 0, -filter.Days)
 
-	statusClause := "status IN ('open', 'in_progress')"
+	statusClause := "status IN ('open', 'working')"
 	if filter.Status != "" {
 		statusClause = "status = ?"
 	}

@@ -121,7 +121,7 @@ func TestProtocol_StatusTransitionsPreserveLabels(t *testing.T) {
 	w.run("comments", "add", a, "Important note")
 
 	// open → in_progress → open → closed → reopen
-	w.run("update", a, "--status", "in_progress")
+	w.run("update", a, "--status", "working")
 	w.run("update", a, "--status", "open")
 	w.run("close", a)
 	w.run("reopen", a)

@@ -410,7 +410,7 @@ func TestTemplateSuite(t *testing.T) {
 
 	t.Run("Clone_StartsWithOpenStatus", func(t *testing.T) {
 		epic := h.createIssue("Template", "", types.TypeEpic, 1)
-		err := s.UpdateIssue(ctx, epic.ID, map[string]interface{}{"status": "in_progress"}, "test-user")
+		err := s.UpdateIssue(ctx, epic.ID, map[string]interface{}{"status": "working"}, "test-user")
 		if err != nil {
 			t.Fatalf("Failed to update status: %v", err)
 		}

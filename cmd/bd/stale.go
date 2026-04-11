@@ -27,8 +27,8 @@ This helps identify:
 			FatalError("--days must be at least 1")
 		}
 		// Validate status if provided
-		if status != "" && status != "open" && status != "in_progress" && status != "blocked" && status != "deferred" {
-			FatalError("invalid status '%s'. Valid values: open, in_progress, blocked, deferred", status)
+		if status != "" && status != "open" && status != "working" && status != "blocked" && status != "deferred" {
+			FatalError("invalid status '%s'. Valid values: open, working, blocked, deferred", status)
 		}
 		filter := types.StaleFilter{
 			Days:   days,
@@ -72,7 +72,7 @@ func displayStaleIssues(issues []*types.Issue, days int) {
 }
 func init() {
 	staleCmd.Flags().IntP("days", "d", 30, "Issues not updated in this many days")
-	staleCmd.Flags().StringP("status", "s", "", "Filter by status (open|in_progress|blocked|deferred)")
+	staleCmd.Flags().StringP("status", "s", "", "Filter by status (open|working|blocked|deferred)")
 	staleCmd.Flags().IntP("limit", "n", 50, "Maximum issues to show")
 	// Note: --json flag is defined as a persistent flag in main.go, not here
 	rootCmd.AddCommand(staleCmd)

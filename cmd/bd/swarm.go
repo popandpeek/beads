@@ -600,7 +600,7 @@ Accepts either:
 
 Displays issues grouped by state:
 - Completed: Closed issues
-- Active: Issues currently in_progress (with assignee)
+- Active: Issues currently working (with assignee)
 - Ready: Open issues with all dependencies satisfied
 - Blocked: Open issues waiting on dependencies
 

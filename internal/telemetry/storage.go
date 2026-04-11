@@ -379,7 +379,7 @@ func (s *InstrumentedStorage) GetStatistics(ctx context.Context) (*types.Statist
 			return metric.WithAttributes(attribute.String("status", status))
 		}
 		s.issueGauge.Record(ctx, int64(v.OpenIssues), statusAttr("open"))
-		s.issueGauge.Record(ctx, int64(v.InProgressIssues), statusAttr("in_progress"))
+		s.issueGauge.Record(ctx, int64(v.InProgressIssues), statusAttr("working"))
 		s.issueGauge.Record(ctx, int64(v.ClosedIssues), statusAttr("closed"))
 		s.issueGauge.Record(ctx, int64(v.DeferredIssues), statusAttr("deferred"))
 	}

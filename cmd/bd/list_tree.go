@@ -170,11 +170,11 @@ func displayPrettyListWithDeps(issues []*types.Issue, showHeader bool, allDeps m
 		switch issue.Status {
 		case "open":
 			openCount++
-		case "in_progress":
+		case "working":
 			inProgressCount++
 		}
 	}
 	fmt.Printf("Total: %d issues (%d open, %d in progress)\n", len(issues), openCount, inProgressCount)
 	fmt.Println()
-	fmt.Println("Status: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred")
+	fmt.Println("Status: ○ open  ◐ working  ● blocked  ✓ closed  ❄ deferred")
 }

@@ -17,7 +17,7 @@ func ScanIssueCountsInTx(ctx context.Context, tx *sql.Tx, stats *types.Statistic
 		SELECT
 			COUNT(*) AS total,
 			COALESCE(SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status = 'working' THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN status = 'deferred' THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN pinned = 1 THEN 1 ELSE 0 END), 0)
