@@ -441,8 +441,14 @@ var listCmd = &cobra.Command{
 			statusParts := strings.Split(status, ",")
 			var customStatuses []string
 			if store != nil {
-				cs, _ := store.GetCustomStatuses(rootCtx)
-				customStatuses = cs
+				cs, err := store.GetCustomStatuses(rootCtx)
+				if err != nil {
+					if !jsonOutput {
+						fmt.Fprintf(os.Stderr, "%s Could not load custom statuses from database: %v (falling back to config)\n", ui.RenderWarn("!"), err)
+					}
+				} else {
+					customStatuses = cs
+				}
 			}
 			if len(statusParts) == 1 {
 				s := types.Status(strings.TrimSpace(statusParts[0]))

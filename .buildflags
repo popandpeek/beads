@@ -1,0 +1,9 @@
+# This file is sourced by scripts to provide standard build flags.
+# Mirrors Makefile CGO configuration for consistency.
+#
+# NOTE: ICU flags are NOT set here. The gms_pure_go build tag (used by
+# goreleaser and `make build`) tells go-mysql-server to use Go's stdlib
+# regex, eliminating the ICU runtime dependency. Only test scripts that
+# explicitly need ICU (test-cgo.sh) should set ICU flags.
+
+export CGO_ENABLED=1

@@ -9,12 +9,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -70,11 +72,16 @@ func WithLock(lock Unlocker) Option {
 // The database is created automatically if it doesn't exist (initSchema handles this).
 //
 // An exclusive flock is held on the data directory for the store's entire
-// lifetime. If another process already holds the lock, New returns an error
-// instead of panicking during concurrent engine initialization (GH#2571).
-// The lock is released when Close is called, unless a pre-acquired lock was
-// supplied via WithLock (in which case the caller is responsible for it).
+// lifetime. If another process already holds the lock, New queues with
+// exponential backoff until the lock becomes available or the context is
+// canceled, instead of panicking during concurrent engine initialization
+// (GH#2571). The lock is released when Close is called, unless a pre-acquired
+// lock was supplied via WithLock (in which case the caller is responsible for it).
 func New(ctx context.Context, beadsDir, database, branch string, opts ...Option) (*EmbeddedDoltStore, error) {
+	if database == "" {
+		return nil, fmt.Errorf("embeddeddolt: database name must not be empty (caller should default to %q)", "beads")
+	}
+
 	var o options
 	for _, fn := range opts {
 		fn(&o)
@@ -99,7 +106,7 @@ func New(ctx context.Context, beadsDir, database, branch string, opts ...Option)
 	lock := o.lock
 	ownsLock := lock == nil
 	if ownsLock {
-		lock, err = TryLock(dataDir)
+		lock, err = WaitLock(ctx, dataDir)
 		if err != nil {
 			return nil, err
 		}
@@ -233,7 +240,7 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 			}
 		}
 
-		applied, err := migrateUp(ctx, tx)
+		applied, err := schema.MigrateUp(ctx, tx)
 		if err != nil {
 			return err
 		}
@@ -242,7 +249,11 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 				return fmt.Errorf("dolt add after migrations: %w", err)
 			}
 			if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', 'schema: apply migrations')"); err != nil {
-				return fmt.Errorf("dolt commit after migrations: %w", err)
+				// Backfill migrations may only create dolt_ignore'd tables (e.g. wisps),
+				// leaving nothing staged for commit. This is expected.
+				if !strings.Contains(err.Error(), "nothing to commit") {
+					return fmt.Errorf("dolt commit after migrations: %w", err)
+				}
 			}
 		}
 		return nil
@@ -697,16 +708,11 @@ func (s *EmbeddedDoltStore) DeleteConfig(ctx context.Context, key string) error 
 }
 
 func (s *EmbeddedDoltStore) GetCustomStatuses(ctx context.Context) ([]string, error) {
-	var result []string
-	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
-		var err error
-		result, err = issueops.GetCustomStatusesTx(ctx, tx)
-		return err
-	})
-	if err != nil || len(result) == 0 {
-		return config.GetCustomStatusesFromYAML(), nil
+	detailed, err := s.GetCustomStatusesDetailed(ctx)
+	if err != nil {
+		return nil, err
 	}
-	return result, nil
+	return types.CustomStatusNames(detailed), nil
 }
 
 func (s *EmbeddedDoltStore) GetCustomStatusesDetailed(ctx context.Context) ([]types.CustomStatus, error) {
@@ -738,7 +744,7 @@ func (s *EmbeddedDoltStore) GetCustomTypes(ctx context.Context) ([]string, error
 		if yamlTypes := config.GetCustomTypesFromYAML(); len(yamlTypes) > 0 {
 			return yamlTypes, nil
 		}
-		return nil, nil
+		return nil, err
 	}
 	return result, nil
 }

@@ -1,0 +1,85 @@
+name: Cross-Version Smoke Tests
+
+on:
+  # On tag push (release gate): test the last 30 releases for broad regression coverage
+  push:
+    tags:
+      - 'v*'
+
+  # On PR to main: test only the last 5 releases for fast feedback
+  pull_request:
+    branches: [ main ]
+
+  # Allow manual trigger with custom version count
+  workflow_dispatch:
+    inputs:
+      version_count:
+        description: 'Number of previous releases to test against'
+        required: false
+        default: '5'
+
+jobs:
+  smoke:
+    name: Upgrade smoke (${{ matrix.prev_version }} → candidate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    strategy:
+      fail-fast: false
+      matrix:
+        prev_version: ${{ fromJson(needs.versions.outputs.matrix) }}
+
+    needs: versions
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Install ICU4C
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libicu-dev
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@beads.test"
+
+      - name: Cache previous release binaries
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/beads-regression
+          key: smoke-binaries-${{ matrix.prev_version }}-${{ runner.os }}
+
+      - name: Build candidate binary
+        run: go build -o /tmp/bd-candidate ./cmd/bd
+
+      - name: Run upgrade smoke tests
+        env:
+          CANDIDATE_BIN: /tmp/bd-candidate
+        run: ./scripts/upgrade-smoke-test.sh ${{ matrix.prev_version }}
+
+  versions:
+    name: Resolve versions to test
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.resolve.outputs.matrix }}
+    steps:
+      - name: Resolve release versions
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Tag push and manual dispatch test more versions; PRs test fewer for speed
+          VERSION_COUNT: ${{ (github.event_name == 'push' && '30') || (github.event_name == 'workflow_dispatch' && inputs.version_count) || '5' }}
+        run: |
+          VERSIONS=$(gh release list \
+            --repo gastownhall/beads \
+            --limit "$VERSION_COUNT" \
+            --json tagName \
+            --jq '[.[].tagName]')
+          echo "matrix=$VERSIONS" >> "$GITHUB_OUTPUT"
+          echo "Testing versions: $VERSIONS"

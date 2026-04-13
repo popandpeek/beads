@@ -251,6 +251,42 @@ func isSelectedNoDBCommand(cmd *cobra.Command) bool {
 	}
 }
 
+// configCommandCanRunWithoutStore returns true for config subcommands whose Run
+// path can execute without an opened Dolt store. This lets no-workspace calls
+// fail or degrade in the command itself instead of tripping low-level DB init.
+func configCommandCanRunWithoutStore(cmd *cobra.Command, args []string) bool {
+	if cmd == nil || cmd.Parent() == nil || cmd.Parent().Name() != "config" {
+		return false
+	}
+
+	switch cmd.Name() {
+	case "show", "validate", "drift", "apply":
+		return true
+	case "set", "get", "unset":
+		if len(args) == 0 {
+			return true
+		}
+		key := args[0]
+		return config.IsYamlOnlyKey(key) || key == "beads.role"
+	case "set-many":
+		if len(args) == 0 {
+			return true
+		}
+		for _, arg := range args {
+			key, _, ok := strings.Cut(arg, "=")
+			if !ok || key == "" {
+				return true
+			}
+			if !config.IsYamlOnlyKey(key) && key != "beads.role" {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
 func prepareSelectedNoDBContext(beadsDir string) {
 	if beadsDir == "" {
 		return
@@ -548,6 +584,7 @@ var rootCmd = &cobra.Command{
 			"quickstart",
 			"setup",
 			"version",
+			"where",
 			"zsh",
 		}
 
@@ -626,15 +663,13 @@ var rootCmd = &cobra.Command{
 				// No database found — allow some commands to run without a database
 				// - import: auto-initializes database if missing
 				// - setup: creates editor integration files (no DB needed)
-				// - config set/get for yaml-only keys: writes to config.yaml, not db (GH#536)
-				isYamlOnlyConfigOp := false
-				if (cmd.Name() == "set" || cmd.Name() == "get") && cmd.Parent() != nil && cmd.Parent().Name() == "config" {
-					if len(args) > 0 && config.IsYamlOnlyKey(args[0]) {
-						isYamlOnlyConfigOp = true
-					}
+				// - config subcommands that operate on config.yaml, git config,
+				//   or best-effort diagnostics only (GH#536, bd-934, bd-omc, bd-3rw)
+				if configCommandCanRunWithoutStore(cmd, args) {
+					return
 				}
 
-				if cmd.Name() != "import" && cmd.Name() != "setup" && !isYamlOnlyConfigOp {
+				if cmd.Name() != "import" && cmd.Name() != "setup" {
 					// No database found - provide context-aware error message
 					fmt.Fprintf(os.Stderr, "Error: no beads database found\n")
 					fmt.Fprintf(os.Stderr, "Hint: %s\n", diagHint())
@@ -729,7 +764,7 @@ var rootCmd = &cobra.Command{
 			// Log so silent fallback to default DB is visible.
 			fmt.Fprintf(os.Stderr, "warning: no beads configuration found in %s; database name may default incorrectly\n", beadsDir)
 		}
-		doltCfg.SyncGitRemote = config.GetString("sync.git-remote")
+		doltCfg.SyncRemote = resolveSyncRemote()
 
 		// Keep standalone CLI auto-start behavior centralized so doctor and
 		// other helper paths stay in lockstep with the main command path.
@@ -766,6 +801,17 @@ var rootCmd = &cobra.Command{
 		storeMutex.Lock()
 		storeActive = true
 		storeMutex.Unlock()
+
+		// Auto-import from issues.jsonl when embedded database is empty (GH#2994).
+		// This handles the upgrade path from pre-0.56 (dolt/) to 1.0+ (embeddeddolt/)
+		// where the new embedded database starts empty but the git-tracked JSONL
+		// still has all the user's data.
+		// Skip auto-import when the user is explicitly running "bd import" —
+		// the import command handles JSONL files itself and auto-importing
+		// first would interfere (double-import / upsert confusion).
+		if store != nil && !useReadOnly && cmd.Name() != "import" {
+			maybeAutoImportJSONL(rootCtx, store, beadsDir)
+		}
 
 		// Validate workspace identity for write commands (GH#2438, GH#2372)
 		// Skip for read-only commands since they can't corrupt data
