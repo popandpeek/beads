@@ -36,6 +36,18 @@ func (s *DoltStore) AddDependency(ctx context.Context, dep *types.Dependency, ac
 	}
 
 	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		// POPANDPEEK-FORK BEGIN: reject parent-child cycles before insert (be-merbj.3)
+		// The check runs inside the same transaction as the insert so two
+		// concurrent `bd parent set` calls cannot both pass and race to create
+		// a loop. Cross-prefix parent-child edges are skipped because the
+		// upstream bead lives in a different database and walking its parent
+		// chain would require a cross-DB query.
+		if dep.Type == types.DepParentChild && !isCrossPrefix {
+			if err := DetectParentCycleInTx(ctx, tx, dep.IssueID, dep.DependsOnID); err != nil {
+				return err
+			}
+		}
+		// POPANDPEEK-FORK END
 		opts := issueops.AddDependencyOpts{
 			SourceTable:   "issues",
 			TargetTable:   targetTable,
