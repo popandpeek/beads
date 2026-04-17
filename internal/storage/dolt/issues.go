@@ -128,6 +128,10 @@ func (s *DoltStore) GetIssueByExternalRef(ctx context.Context, externalRef strin
 // UpdateIssue updates fields on an issue.
 // Delegates SQL work to issueops.UpdateIssueInTx; handles Dolt-specific concerns
 // (metadata validation, DemoteToWisp, DOLT_ADD/COMMIT, cache invalidation).
+//
+// POPANDPEEK-FORK: Runs inside Pattern A (runDoltTransaction) and cascades
+// status / closed_at / external_ref / close_reason to parent-child descendants
+// atomically (be-merbj.3, b-nxe8m).
 func (s *DoltStore) UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
 	// Validate metadata against schema before wisp routing (GH#1416 Phase 2)
 	if rawMeta, ok := updates["metadata"]; ok {
@@ -155,37 +159,30 @@ func (s *DoltStore) UpdateIssue(ctx context.Context, id string, updates map[stri
 		return s.DemoteToWisp(ctx, id, updates, actor)
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	result, err := issueops.UpdateIssueInTx(ctx, tx, id, updates, actor)
-	if err != nil {
+	// POPANDPEEK-FORK BEGIN: Pattern A + cascade (be-merbj.3)
+	// Wrap the parent update and the descendant cascade in a single pinned
+	// runDoltTransaction so they land as one Dolt commit. This replaces the
+	// older Pattern B flow (inline CALL DOLT_COMMIT) called out in be-nxe8m.
+	commitMsg := fmt.Sprintf("bd: update %s", id)
+	if err := s.RunInTransaction(ctx, commitMsg, func(tx storage.Transaction) error {
+		dt := tx.(*doltTransaction)
+		if _, err := issueops.UpdateIssueInTx(ctx, dt.tx, id, updates, actor); err != nil {
+			return err
+		}
+		dt.dirty.MarkDirty("issues")
+		dt.dirty.MarkDirty("events")
+		return cascadeUpdateToDescendants(ctx, dt, id, updates, actor)
+	}); err != nil {
 		return err
 	}
-
-	// Dolt versioning for permanent issues.
-	// GH#2455: Stage only the tables we modified, then commit without -A.
-	for _, table := range []string{"issues", "events"} {
-		_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
-	}
-	commitMsg := fmt.Sprintf("bd: update %s", id)
-	if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-		commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-		return fmt.Errorf("dolt commit: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return wrapTransactionError("commit update issue", err)
-	}
-	// Status changes affect the active set used by blocked ID computation
+	// Status changes affect the active set used by blocked ID computation.
+	// Cascade may also change descendants' statuses, so invalidate whenever
+	// any cascadable status-bearing field was in the update.
 	if _, hasStatus := updates["status"]; hasStatus {
 		s.invalidateBlockedIDsCache()
 	}
-	_ = result // OldIssue available if needed for future cache invalidation
 	return nil
+	// POPANDPEEK-FORK END
 }
 
 // ClaimIssue atomically claims an issue using compare-and-swap semantics.
@@ -257,6 +254,11 @@ func (s *DoltStore) UpdateIssueType(ctx context.Context, id string, issueType st
 // CloseIssue closes an issue with a reason.
 // Delegates SQL work to issueops.CloseIssueInTx; handles Dolt-specific concerns
 // (wisp routing, DOLT_ADD/COMMIT, cache invalidation).
+//
+// POPANDPEEK-FORK: Runs inside Pattern A (runDoltTransaction) and cascades the
+// close to every parent-child descendant in the same transaction. Each
+// descendant's close_reason is suffixed with "via parent <id>" (be-merbj.3,
+// b-nxe8m).
 func (s *DoltStore) CloseIssue(ctx context.Context, id string, reason string, actor string, session string) error {
 	// Route ephemeral IDs to wisps table (falls through for promoted wisps).
 	// Wisps skip DOLT_COMMIT since they live in dolt_ignored tables.
@@ -264,33 +266,23 @@ func (s *DoltStore) CloseIssue(ctx context.Context, id string, reason string, ac
 		return s.closeWisp(ctx, id, reason, actor, session)
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	if _, err := issueops.CloseIssueInTx(ctx, tx, id, reason, actor, session); err != nil {
+	// POPANDPEEK-FORK BEGIN: Pattern A + cascade close (be-merbj.3)
+	commitMsg := fmt.Sprintf("bd: close %s", id)
+	if err := s.RunInTransaction(ctx, commitMsg, func(tx storage.Transaction) error {
+		dt := tx.(*doltTransaction)
+		if _, err := issueops.CloseIssueInTx(ctx, dt.tx, id, reason, actor, session); err != nil {
+			return err
+		}
+		dt.dirty.MarkDirty("issues")
+		dt.dirty.MarkDirty("events")
+		return cascadeCloseToDescendants(ctx, dt, id, reason, actor, session)
+	}); err != nil {
 		return err
 	}
-
-	// Dolt versioning for permanent issues.
-	// GH#2455: Stage only the tables we modified, then commit without -A.
-	for _, table := range []string{"issues", "events"} {
-		_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
-	}
-	commitMsg := fmt.Sprintf("bd: close %s", id)
-	if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-		commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-		return fmt.Errorf("dolt commit: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return wrapTransactionError("commit close issue", err)
-	}
-	// Closing changes the active set, which affects blocked ID computation (GH#1495)
+	// Closing changes the active set, which affects blocked ID computation (GH#1495).
 	s.invalidateBlockedIDsCache()
 	return nil
+	// POPANDPEEK-FORK END
 }
 
 // DeleteIssue permanently removes an issue
