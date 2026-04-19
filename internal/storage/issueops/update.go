@@ -124,8 +124,21 @@ type UpdateResult struct {
 // It routes to the correct table (issues/wisps) automatically.
 // The caller is responsible for Dolt versioning (DOLT_ADD/COMMIT) if needed.
 //
+// Pass "_if_match" in updates with an updated_at timestamp string to enable
+// optimistic locking. Returns storage.ErrStaleUpdate (wrapped) if the issue
+// was modified since the token was read.
+//
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
 func UpdateIssueInTx(ctx context.Context, tx *sql.Tx, id string, updates map[string]interface{}, actor string) (*UpdateResult, error) {
+	// Extract optimistic locking token — not a DB column, controls WHERE clause.
+	// Accepts time.Time (from CLI) or string (for tests/scripting).
+	var ifMatch interface{}
+	hasIfMatch := false
+	if v, ok := updates["_if_match"]; ok && v != nil {
+		hasIfMatch = true
+		ifMatch = v
+	}
+
 	// Route to correct table.
 	isWisp := IsActiveWispInTx(ctx, tx, id)
 	issueTable, _, eventTable, _ := WispTableRouting(isWisp)
@@ -141,6 +154,9 @@ func UpdateIssueInTx(ctx context.Context, tx *sql.Tx, id string, updates map[str
 	args := []interface{}{time.Now().UTC()}
 
 	for key, value := range updates {
+		if key == "_if_match" {
+			continue // Control key, not a DB column
+		}
 		if !IsAllowedUpdateField(key) {
 			return nil, fmt.Errorf("invalid field for update: %s", key)
 		}
@@ -190,11 +206,23 @@ func UpdateIssueInTx(ctx context.Context, tx *sql.Tx, id string, updates map[str
 	setClauses, args = ManageStartedAt(oldIssue, updates, setClauses, args)
 
 	args = append(args, id)
+	whereClause := "id = ?"
+	if hasIfMatch {
+		whereClause = "id = ? AND updated_at = ?"
+		args = append(args, ifMatch)
+	}
 
 	//nolint:gosec // G201: issueTable comes from WispTableRouting (hardcoded constants)
-	query := fmt.Sprintf("UPDATE %s SET %s WHERE id = ?", issueTable, strings.Join(setClauses, ", "))
-	if _, err := tx.ExecContext(ctx, query, args...); err != nil {
+	query := fmt.Sprintf("UPDATE %s SET %s WHERE %s", issueTable, strings.Join(setClauses, ", "), whereClause)
+	execResult, err := tx.ExecContext(ctx, query, args...)
+	if err != nil {
 		return nil, fmt.Errorf("failed to update issue: %w", err)
+	}
+	if hasIfMatch {
+		n, _ := execResult.RowsAffected()
+		if n == 0 {
+			return nil, fmt.Errorf("%w (if-match: %v)", storage.ErrStaleUpdate, ifMatch)
+		}
 	}
 
 	// Record event.

@@ -28,6 +28,10 @@ var ErrNotInitialized = errors.New("database not initialized")
 // ErrPrefixMismatch is returned when an issue ID does not match the configured prefix.
 var ErrPrefixMismatch = errors.New("prefix mismatch")
 
+// ErrStaleUpdate is returned when an --if-match token does not match the
+// current updated_at of the issue (optimistic locking conflict).
+var ErrStaleUpdate = errors.New("stale update: issue was modified since last read")
+
 // Storage is the interface satisfied by *dolt.DoltStore.
 // Consumers depend on this interface rather than on the concrete type so that
 // alternative implementations (mocks, proxies, etc.) can be substituted.

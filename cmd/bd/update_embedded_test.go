@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
@@ -760,6 +761,47 @@ func TestEmbeddedUpdate(t *testing.T) {
 		got := bdShow(t, bd, dir, issue.ID)
 		if got.Description != "from file" {
 			t.Errorf("expected description 'from file', got %q", got.Description)
+		}
+	})
+
+	// ===== --if-match optimistic locking =====
+
+	t.Run("if_match_succeeds_with_current_token", func(t *testing.T) {
+		t.Parallel()
+		issue := bdCreate(t, bd, dir, "If-match success test", "--type", "task")
+		got := bdShow(t, bd, dir, issue.ID)
+		token := got.UpdatedAt.UTC().Format(time.RFC3339Nano)
+		bdUpdate(t, bd, dir, issue.ID, "--title", "Updated title", "--if-match", token)
+		after := bdShow(t, bd, dir, issue.ID)
+		if after.Title != "Updated title" {
+			t.Errorf("expected title 'Updated title', got %q", after.Title)
+		}
+	})
+
+	t.Run("if_match_fails_with_stale_token", func(t *testing.T) {
+		t.Parallel()
+		issue := bdCreate(t, bd, dir, "If-match stale test", "--type", "task")
+		// Advance updated_at by doing a real update first.
+		bdUpdate(t, bd, dir, issue.ID, "--notes", "intermediate update")
+		// Use the original (now stale) updated_at token.
+		staleToken := issue.UpdatedAt.UTC().Format(time.RFC3339Nano)
+		out := bdUpdateFail(t, bd, dir, issue.ID, "--title", "should not apply", "--if-match", staleToken)
+		if !strings.Contains(out, "stale update") {
+			t.Errorf("expected 'stale update' in error output, got: %s", out)
+		}
+		// Title must remain unchanged.
+		after := bdShow(t, bd, dir, issue.ID)
+		if after.Title != "If-match stale test" {
+			t.Errorf("stale update should not have changed title, got %q", after.Title)
+		}
+	})
+
+	t.Run("if_match_invalid_format_rejected", func(t *testing.T) {
+		t.Parallel()
+		issue := bdCreate(t, bd, dir, "If-match bad format test", "--type", "task")
+		out := bdUpdateFail(t, bd, dir, issue.ID, "--title", "nope", "--if-match", "not-a-timestamp")
+		if !strings.Contains(out, "invalid --if-match format") {
+			t.Errorf("expected 'invalid --if-match format' in error output, got: %s", out)
 		}
 	})
 }

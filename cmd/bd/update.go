@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -300,6 +301,23 @@ create, update, show, or close operation).`,
 		// Get claim flag
 		claimFlag, _ := cmd.Flags().GetBool("claim")
 
+		// Parse --if-match optimistic locking token
+		var ifMatchTime time.Time
+		hasIfMatch := cmd.Flags().Changed("if-match")
+		if hasIfMatch {
+			ifMatchStr, _ := cmd.Flags().GetString("if-match")
+			var parseErr error
+			for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05.999999", "2006-01-02 15:04:05"} {
+				ifMatchTime, parseErr = time.Parse(layout, ifMatchStr)
+				if parseErr == nil {
+					break
+				}
+			}
+			if parseErr != nil {
+				FatalErrorRespectJSON("invalid --if-match format %q: expected RFC3339 timestamp (e.g., from bd show --json .updated_at)", ifMatchStr)
+			}
+		}
+
 		if len(updates) == 0 && !claimFlag {
 			fmt.Println("No updates specified")
 			return
@@ -385,9 +403,16 @@ create, update, show, or close operation).`,
 				combined += appendNotes
 				regularUpdates["notes"] = combined
 			}
+			if hasIfMatch {
+				regularUpdates["_if_match"] = ifMatchTime
+			}
 			if len(regularUpdates) > 0 {
 				if err := issueStore.UpdateIssue(ctx, result.ResolvedID, regularUpdates, actor); err != nil {
-					fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, err)
+					if errors.Is(err, storage.ErrStaleUpdate) {
+						fmt.Fprintf(os.Stderr, "Error updating %s: %v\n  Hint: re-read the issue and retry with the current --if-match value\n", id, err)
+					} else {
+						fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, err)
+					}
 					result.Close()
 					continue
 				}
@@ -646,6 +671,8 @@ func init() {
 	updateCmd.Flags().Bool("persistent", false, "Mark issue as persistent (promote wisp to regular issue)")
 	updateCmd.Flags().Bool("no-history", false, "Mark issue as no-history (skip Dolt commits, not GC-eligible)")
 	updateCmd.Flags().Bool("history", false, "Clear no-history flag (re-enable Dolt commit history)")
+	// Optimistic locking (be-yn7mz.3)
+	updateCmd.Flags().String("if-match", "", "Only update if issue updated_at matches this timestamp (RFC3339). Prevents clobbering concurrent edits.")
 	// Metadata flag (GH#1413)
 	updateCmd.Flags().String("metadata", "", "Set custom metadata (JSON string or @file.json to read from file)")
 	// Incremental metadata edits (GH#1406)
