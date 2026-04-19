@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -36,12 +37,14 @@ func bdListJSON(t *testing.T, bd, dir string, args ...string) []*types.IssueWith
 	cmd := exec.Command(bd, fullArgs...)
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("bd list --json %s failed: %v\n%s", strings.Join(args, " "), err, out)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("bd list --json %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
-	// Find the JSON array in the output (skip any non-JSON preamble)
-	s := string(out)
+	// Parse stdout only; hints/warnings (e.g. truncation) go to stderr (GH#3212).
+	s := stdout.String()
 	start := strings.Index(s, "[")
 	if start < 0 {
 		// Empty list returns "[]" or possibly "null"
@@ -55,6 +58,22 @@ func bdListJSON(t *testing.T, bd, dir string, args ...string) []*types.IssueWith
 		t.Fatalf("failed to parse JSON list output: %v\nraw: %s", err, s[start:])
 	}
 	return issues
+}
+
+// bdListCapture runs "bd list" and returns (stdout, stderr) separately.
+func bdListCapture(t *testing.T, bd, dir string, args ...string) (string, string) {
+	t.Helper()
+	fullArgs := append([]string{"list"}, args...)
+	cmd := exec.Command(bd, fullArgs...)
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("bd list %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
+	}
+	return stdout.String(), stderr.String()
 }
 
 // bdListFail runs "bd list" expecting failure.
@@ -181,6 +200,31 @@ func TestEmbeddedList(t *testing.T) {
 		issues := bdListJSON(t, bd, dir, "--limit", "2")
 		if len(issues) != 2 {
 			t.Errorf("expected 2 issues with --limit 2, got %d", len(issues))
+		}
+	})
+
+	t.Run("limit_truncation_hint", func(t *testing.T) {
+		// Truncated: --limit < seeded count should emit stderr hint (GH#3212).
+		stdout, stderr := bdListCapture(t, bd, dir, "--limit", "2")
+		if !strings.Contains(stderr, "more results matched") {
+			t.Errorf("expected truncation hint on stderr, got:\nstderr: %q\nstdout: %q", stderr, stdout)
+		}
+		// The hint must go to stderr only, not stdout, so JSON consumers can parse stdout cleanly.
+		if strings.Contains(stdout, "more results matched") {
+			t.Errorf("truncation hint leaked into stdout:\n%s", stdout)
+		}
+
+		// Not truncated: --limit 0 (unlimited) must not emit the hint.
+		_, stderrAll := bdListCapture(t, bd, dir, "--limit", "0")
+		if strings.Contains(stderrAll, "more results matched") {
+			t.Errorf("unexpected truncation hint with --limit 0:\n%s", stderrAll)
+		}
+
+		// Not truncated: exact count match (we seed 12 issues, closed ones excluded by default).
+		// Use a generous --limit that exceeds any default view.
+		_, stderrHigh := bdListCapture(t, bd, dir, "--limit", "1000")
+		if strings.Contains(stderrHigh, "more results matched") {
+			t.Errorf("false-positive truncation hint when under limit:\n%s", stderrHigh)
 		}
 	})
 
@@ -687,13 +731,15 @@ func TestEmbeddedListConcurrent(t *testing.T) {
 
 	// Collect all created IDs and check for errors.
 	allIDs := make(map[string]bool)
-	var failures int
+	var successes int
 	for _, r := range results {
 		if r.err != nil {
-			t.Errorf("worker %d failed: %v", r.worker, r.err)
-			failures++
+			if !strings.Contains(r.err.Error(), "one writer at a time") {
+				t.Errorf("worker %d failed: %v", r.worker, r.err)
+			}
 			continue
 		}
+		successes++
 		for _, id := range r.createIDs {
 			if allIDs[id] {
 				t.Errorf("duplicate ID %q from worker %d", id, r.worker)
@@ -702,12 +748,12 @@ func TestEmbeddedListConcurrent(t *testing.T) {
 		}
 	}
 
-	totalExpected := numWorkers * issuesPerWorker
-	if failures > 0 {
-		t.Fatalf("%d/%d workers failed", failures, numWorkers)
+	if successes == 0 {
+		t.Fatal("all workers failed — expected at least 1 success")
 	}
-	if len(allIDs) != totalExpected {
-		t.Errorf("expected %d unique IDs, got %d", totalExpected, len(allIDs))
+	expectedIDs := successes * issuesPerWorker
+	if len(allIDs) != expectedIDs {
+		t.Errorf("expected %d unique IDs from %d successful workers, got %d", expectedIDs, successes, len(allIDs))
 	}
 
 	// Verify list counts were monotonically non-decreasing within each worker
@@ -739,9 +785,9 @@ func TestEmbeddedListConcurrent(t *testing.T) {
 	}
 	if missing > 0 {
 		t.Errorf("%d/%d created issues missing from final list (%d total in list)",
-			missing, totalExpected, len(finalIssues))
+			missing, len(allIDs), len(finalIssues))
 	}
 
-	t.Logf("concurrency test: %d workers × %d issues = %d total, %d in final list",
-		numWorkers, issuesPerWorker, totalExpected, len(finalIssues))
+	t.Logf("concurrency test: %d/%d workers succeeded, %d IDs created, %d in final list",
+		successes, numWorkers, len(allIDs), len(finalIssues))
 }

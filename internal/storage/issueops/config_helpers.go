@@ -71,12 +71,16 @@ func ResolveCustomStatusesDetailedInTx(ctx context.Context, tx *sql.Tx) ([]types
 		if err := rows.Err(); err != nil {
 			return nil, fmt.Errorf("reading custom_statuses: %w", err)
 		}
-		// Table query succeeded — return result even if empty.
-		// Only fall through to config string when the table doesn't exist (query error above).
-		return result, nil
+		// Table has rows — use them as the authoritative source.
+		// If the table is empty (e.g. schema migration created the table but
+		// failed to populate it from status.custom config), fall through to
+		// the config string so existing custom statuses aren't silently lost.
+		if len(result) > 0 {
+			return result, nil
+		}
 	}
 
-	// Fallback: table doesn't exist (pre-migration) — read from config string
+	// Fallback: table doesn't exist or is empty — read from config string
 	value, err := GetConfigInTx(ctx, tx, "status.custom")
 	if err != nil {
 		if yamlStatuses := config.GetCustomStatusesFromYAML(); len(yamlStatuses) > 0 {
@@ -119,9 +123,12 @@ func ResolveCustomTypesInTx(ctx context.Context, tx *sql.Tx) ([]string, error) {
 		if err := rows.Err(); err != nil {
 			return nil, fmt.Errorf("reading custom_types: %w", err)
 		}
-		// Table query succeeded — return result even if empty.
-		// Only fall through to config string when the table doesn't exist (query error above).
-		return result, nil
+		if len(result) > 0 {
+			return result, nil
+		}
+		// Table exists but is empty — fall through to config string.
+		// This handles the case where schema migration created the table
+		// but didn't populate it from the existing types.custom config.
 	}
 
 	// Fallback: table doesn't exist (pre-migration) — read from config string
@@ -146,6 +153,61 @@ func ResolveCustomTypesInTx(ctx context.Context, tx *sql.Tx) ([]string, error) {
 		return yamlTypes, nil
 	}
 	return nil, nil
+}
+
+// SyncCustomStatusesTable replaces all rows in custom_statuses with parsed config value.
+// Used by both DoltStore and EmbeddedDoltStore when "status.custom" config changes.
+func SyncCustomStatusesTable(ctx context.Context, tx *sql.Tx, value string) error {
+	if _, err := tx.ExecContext(ctx, "DELETE FROM custom_statuses"); err != nil {
+		return err
+	}
+	if value == "" {
+		return nil
+	}
+	parsed, err := types.ParseCustomStatusConfig(value)
+	if err != nil {
+		return fmt.Errorf("invalid status.custom value: %w", err)
+	}
+	for _, s := range parsed {
+		if _, err := tx.ExecContext(ctx, "INSERT INTO custom_statuses (name, category) VALUES (?, ?)",
+			s.Name, string(s.Category)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SyncCustomTypesTable replaces all rows in custom_types with parsed config value.
+// Used by both DoltStore and EmbeddedDoltStore when "types.custom" config changes.
+func SyncCustomTypesTable(ctx context.Context, tx *sql.Tx, value string) error {
+	if _, err := tx.ExecContext(ctx, "DELETE FROM custom_types"); err != nil {
+		return err
+	}
+	if value == "" {
+		return nil
+	}
+	names := parseTypesValue(value)
+	for _, name := range names {
+		if _, err := tx.ExecContext(ctx, "INSERT INTO custom_types (name) VALUES (?)", name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// parseTypesValue tries JSON array first, then falls back to comma-separated.
+func parseTypesValue(value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	// Try JSON array first (e.g. '["gate","convoy"]')
+	var jsonTypes []string
+	if err := json.Unmarshal([]byte(value), &jsonTypes); err == nil {
+		return jsonTypes
+	}
+	// Fall back to comma-separated
+	return ParseCommaSeparatedList(value)
 }
 
 // ResolveInfraTypesInTx reads infrastructure types from the database,

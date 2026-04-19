@@ -3,6 +3,7 @@ package versioncontrolops
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/steveyegge/beads/internal/storage"
 )
@@ -35,8 +36,17 @@ func RemoveRemote(ctx context.Context, db DBConn, name string) error {
 }
 
 // Fetch fetches refs from a remote without merging.
+//
+// On failure, a best-effort GC is run to clean up any orphaned tmp_pack_*
+// files that DOLT_FETCH may have left in the git-remote-cache. These files
+// accumulate unboundedly across repeated failures and can consume hundreds of
+// gigabytes over time.
 func Fetch(ctx context.Context, db DBConn, peer string) error {
 	if _, err := db.ExecContext(ctx, "CALL DOLT_FETCH(?)", peer); err != nil {
+		// Best-effort: ignore GC errors — the original fetch error is what matters.
+		// DoltGC requires a non-transactional connection; if db is a tx it will
+		// fail silently here, which is acceptable.
+		_ = DoltGC(ctx, db)
 		return fmt.Errorf("fetch from %s: %w", peer, err)
 	}
 	return nil
@@ -58,10 +68,22 @@ func ForcePush(ctx context.Context, db DBConn, remote, branch string) error {
 	return nil
 }
 
-// Pull pulls changes from the named remote.
-func Pull(ctx context.Context, db DBConn, remote string) error {
-	if _, err := db.ExecContext(ctx, "CALL DOLT_PULL(?)", remote); err != nil {
-		return fmt.Errorf("pull from %s: %w", remote, err)
+// Pull pulls changes from the named remote by fetching the branch and merging
+// the remote tracking ref. This is equivalent to DOLT_PULL(remote, branch) but
+// avoids a nil-pointer panic in embedded Dolt when upstream branch tracking is
+// not configured in repo_state.json (GH#3144).
+func Pull(ctx context.Context, db DBConn, remote, branch string) error {
+	if _, err := db.ExecContext(ctx, "CALL DOLT_FETCH(?, ?)", remote, branch); err != nil {
+		return fmt.Errorf("fetch from %s/%s: %w", remote, branch, err)
+	}
+	trackingRef := remote + "/" + branch
+	if _, err := db.ExecContext(ctx, "CALL DOLT_MERGE(?)", trackingRef); err != nil {
+		// DOLT_MERGE returns "Already up to date." when there is nothing
+		// to merge; DOLT_PULL swallows this internally, so we do the same.
+		if strings.Contains(err.Error(), "up to date") {
+			return nil
+		}
+		return fmt.Errorf("merge %s: %w", trackingRef, err)
 	}
 	return nil
 }

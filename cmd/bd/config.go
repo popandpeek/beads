@@ -11,7 +11,9 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/steveyegge/beads/cmd/bd/doctor"
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -25,12 +27,23 @@ var configCmd = &cobra.Command{
 Configuration is stored per-project in the beads database and is version-control-friendly.
 
 Common namespaces:
+  - export.*          Auto-export settings (stored in config.yaml)
   - jira.*            Jira integration settings
   - linear.*          Linear integration settings
   - github.*          GitHub integration settings
   - custom.*          Custom integration settings
   - status.*          Issue status configuration
   - doctor.suppress.* Suppress specific bd doctor warnings (GH#1095)
+
+Auto-Export (config.yaml):
+  Writes .beads/issues.jsonl after every write command (throttled).
+  Enabled by default. Useful for viewers (bv) and git-based sync.
+
+  Keys:
+    export.auto       Enable/disable auto-export (default: true)
+    export.path       Output filename relative to .beads/ (default: issues.jsonl)
+    export.interval   Minimum time between exports (default: 60s)
+    export.git-add    Auto-stage the export file (default: true)
 
 Custom Status States:
   You can define custom status states for multi-step pipelines using the
@@ -51,11 +64,13 @@ Suppressing Doctor Warnings:
   To unsuppress: bd config unset doctor.suppress.<slug>
 
 Examples:
+  bd config set export.auto false                      # Disable auto-export
+  bd config set export.path "beads.jsonl"              # Custom export filename
   bd config set jira.url "https://company.atlassian.net"
   bd config set jira.project "PROJ"
   bd config set status.custom "awaiting_review,awaiting_testing"
   bd config set doctor.suppress.pending-migrations true
-  bd config get jira.url
+  bd config get export.auto
   bd config list
   bd config unset jira.url`,
 }
@@ -86,6 +101,7 @@ var configSetCmd = &cobra.Command{
 			} else {
 				fmt.Printf("Set %s = %s (in config.yaml)\n", key, value)
 			}
+			printConfigSideEffects(checkConfigSetSideEffects(key, value))
 			return
 		}
 
@@ -134,6 +150,9 @@ var configSetCmd = &cobra.Command{
 			fmt.Fprintf(os.Stderr, "Error setting config: %v\n", err)
 			os.Exit(1)
 		}
+		if _, err := store.CommitPending(ctx, getActor()); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to commit config change: %v\n", err)
+		}
 
 		if jsonOutput {
 			outputJSON(map[string]string{
@@ -143,6 +162,7 @@ var configSetCmd = &cobra.Command{
 		} else {
 			fmt.Printf("Set %s = %s\n", key, value)
 		}
+		printConfigSideEffects(checkConfigSetSideEffects(key, value))
 	},
 }
 
@@ -279,34 +299,53 @@ var configListCmd = &cobra.Command{
 // This addresses the confusion when `bd config list` shows one value but the effective
 // value used by commands is different due to higher-priority config sources.
 func showConfigYAMLOverrides(dbConfig map[string]string) {
-	var warnings []string
+	var envWarnings []string
 
-	// Check each DB config key for env var overrides
+	// Check each DB config key for env var overrides using config.EnvVarName
+	// which handles both BD_* and legacy BEADS_* prefixes with LookupEnv.
 	for key, dbValue := range dbConfig {
-		envKey := "BD_" + strings.ToUpper(strings.ReplaceAll(strings.ReplaceAll(key, "-", "_"), ".", "_"))
-		if envValue := os.Getenv(envKey); envValue != "" && envValue != dbValue {
-			warnings = append(warnings, fmt.Sprintf("  %s: DB has %q, but env %s=%q takes precedence", key, dbValue, envKey, envValue))
+		if envName := config.EnvVarName(key); envName != "" {
+			envValue := os.Getenv(envName)
+			if envValue != dbValue {
+				envWarnings = append(envWarnings, fmt.Sprintf("  %s: DB has %q, but env %s=%q takes precedence", key, dbValue, envName, envValue))
+			}
 		}
 	}
 
-	// Check for yaml-only keys set in config.yaml that aren't visible in DB output
-	yamlKeys := []string{
-		"no-db", "json", "actor", "identity",
-		"routing.mode", "routing.default", "routing.maintainer", "routing.contributor",
-		"sync.git-remote", "no-push", "no-git-ops",
-		"git.author", "git.no-gpg-sign",
-		"create.require-description",
-		"validation.on-create", "validation.on-close", "validation.on-sync",
-		"hierarchy.max-depth",
-		"backup.enabled", "backup.interval", "backup.git-push", "backup.git-repo",
-		"dolt.idle-timeout", "dolt.shared-server",
-	}
+	// Discover yaml-only keys dynamically via AllKeys() instead of a hardcoded list.
+	// This stays in sync as new yaml-only keys are added to the config system.
+	allKeys := config.AllKeys()
+	sort.Strings(allKeys)
 
 	var yamlOverrides []string
-	for _, key := range yamlKeys {
-		val := config.GetYamlConfig(key)
-		if val != "" && config.GetValueSource(key) == config.SourceConfigFile {
+	for _, key := range allKeys {
+		// Skip keys already shown in the DB config section
+		if _, inDB := dbConfig[key]; inDB {
+			continue
+		}
+		// Only show yaml-only keys that are explicitly set in config.yaml
+		if !config.IsYamlOnlyKey(key) {
+			continue
+		}
+		if config.GetValueSource(key) != config.SourceConfigFile {
+			continue
+		}
+		val := config.GetString(key)
+		if val != "" {
 			yamlOverrides = append(yamlOverrides, fmt.Sprintf("  %s = %s", key, val))
+		}
+	}
+
+	// Also check yaml-only keys for env var overrides
+	for _, key := range allKeys {
+		if _, inDB := dbConfig[key]; inDB {
+			continue // already checked above
+		}
+		if envName := config.EnvVarName(key); envName != "" {
+			src := config.GetValueSource(key)
+			if src == config.SourceEnvVar {
+				envWarnings = append(envWarnings, fmt.Sprintf("  %s: env %s=%q overrides config", key, envName, os.Getenv(envName)))
+			}
 		}
 	}
 
@@ -317,13 +356,15 @@ func showConfigYAMLOverrides(dbConfig map[string]string) {
 		}
 	}
 
-	if len(warnings) > 0 {
-		sort.Strings(warnings)
+	if len(envWarnings) > 0 {
+		sort.Strings(envWarnings)
 		fmt.Println("\n⚠ Environment variable overrides detected:")
-		for _, w := range warnings {
+		for _, w := range envWarnings {
 			fmt.Println(w)
 		}
 	}
+
+	fmt.Println("\nTip: Run 'bd config show' for all effective config with provenance.")
 }
 
 var configUnsetCmd = &cobra.Command{
@@ -349,6 +390,7 @@ var configUnsetCmd = &cobra.Command{
 			} else {
 				fmt.Printf("Unset %s (in config.yaml)\n", key)
 			}
+			printConfigSideEffects(checkConfigUnsetSideEffects(key))
 			return
 		}
 
@@ -381,6 +423,9 @@ var configUnsetCmd = &cobra.Command{
 			fmt.Fprintf(os.Stderr, "Error deleting config: %v\n", err)
 			os.Exit(1)
 		}
+		if _, err := store.CommitPending(ctx, getActor()); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to commit config change: %v\n", err)
+		}
 
 		if jsonOutput {
 			outputJSON(map[string]string{
@@ -389,6 +434,7 @@ var configUnsetCmd = &cobra.Command{
 		} else {
 			fmt.Printf("Unset %s\n", key)
 		}
+		printConfigSideEffects(checkConfigUnsetSideEffects(key))
 	},
 }
 
@@ -400,24 +446,16 @@ var configValidateCmd = &cobra.Command{
 Checks:
   - federation.sovereignty is valid (T1, T2, T3, T4, or empty)
   - federation.remote is set for Dolt sync
-  - Remote URL format is valid (dolthub://, gs://, s3://, file://)
+  - Remote URL format is valid (dolthub://, gs://, s3://, az://, file://)
   - routing.mode is valid (auto, maintainer, contributor, explicit)
 
-Examples:
-  bd config validate
-  bd config validate --json`,
+	Examples:
+	  bd config validate
+	  bd config validate --json`,
 	Run: func(cmd *cobra.Command, args []string) {
-		cwd, err := os.Getwd()
+		repoPath, err := resolvedConfigRepoRoot()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-
-		// Find repo root by walking up to find .beads directory
-		repoPath := findBeadsRepoRoot(cwd)
-		if repoPath == "" {
-			fmt.Fprintf(os.Stderr, "Error: not in a beads repository (no .beads directory found)\n")
-			os.Exit(1)
+			FatalErrorWithHintRespectJSON(activeWorkspaceNotFoundError(), diagHint())
 		}
 
 		// Run the existing doctor config values check
@@ -490,10 +528,20 @@ func validateSyncConfig(repoPath string) []string {
 		issues = append(issues, "federation.remote: required for Dolt sync")
 	}
 
-	// Validate remote URL format
+	// Strict security validation of remote URL
 	if federationRemote != "" {
-		if !isValidRemoteURL(federationRemote) {
-			issues = append(issues, fmt.Sprintf("federation.remote: %q is not a valid remote URL (expected dolthub://, gs://, s3://, file://, or standard git URL)", federationRemote))
+		if err := remotecache.ValidateRemoteURL(federationRemote); err != nil {
+			issues = append(issues, fmt.Sprintf("federation.remote: %s", err))
+		}
+	}
+
+	// Validate against allowed-remote-patterns if configured
+	if federationRemote != "" {
+		patterns := v.GetStringSlice("federation.allowed-remote-patterns")
+		if len(patterns) > 0 {
+			if err := remotecache.ValidateRemoteURLWithPatterns(federationRemote, patterns); err != nil {
+				issues = append(issues, fmt.Sprintf("federation.remote: %s", err))
+			}
 		}
 	}
 
@@ -501,9 +549,10 @@ func validateSyncConfig(repoPath string) []string {
 }
 
 // isValidRemoteURL validates remote URL formats for sync configuration.
-// Delegates to remotecache.IsRemoteURL for consistent URL classification.
-func isValidRemoteURL(url string) bool {
-	return remotecache.IsRemoteURL(url)
+// Uses strict security validation that checks structural correctness,
+// rejects control characters, and validates per-scheme requirements.
+func isValidRemoteURL(rawURL string) bool {
+	return remotecache.ValidateRemoteURL(rawURL) == nil
 }
 
 // findBeadsRepoRoot walks up from the given path to find the repo root (containing .beads)
@@ -516,10 +565,29 @@ func findBeadsRepoRoot(startPath string) string {
 		}
 		parent := filepath.Dir(path)
 		if parent == path {
-			return ""
+			break
 		}
 		path = parent
 	}
+
+	if isGitRepo() && git.IsWorktree() {
+		if fallbackDir := beads.GetWorktreeFallbackBeadsDir(); fallbackDir != "" {
+			return filepath.Dir(fallbackDir)
+		}
+	}
+
+	return ""
+}
+
+// resolvedConfigRepoRoot returns the repository root for the active beads
+// workspace. It follows FindBeadsDir semantics, including BEADS_DIR and
+// worktree/shared fallback resolution.
+func resolvedConfigRepoRoot() (string, error) {
+	beadsDir := beads.FindBeadsDir()
+	if beadsDir == "" {
+		return "", fmt.Errorf("%s", activeWorkspaceNotFoundError())
+	}
+	return filepath.Dir(beadsDir), nil
 }
 
 var configSetManyCmd = &cobra.Command{
@@ -609,6 +677,9 @@ Examples:
 					fmt.Fprintf(os.Stderr, "Error setting config %s: %v\n", p.key, err)
 					os.Exit(1)
 				}
+			}
+			if _, err := store.CommitPending(ctx, getActor()); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to commit config changes: %v\n", err)
 			}
 		}
 

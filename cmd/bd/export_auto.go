@@ -67,7 +67,7 @@ func maybeAutoExport(ctx context.Context) {
 	// Change detection via Dolt commit hash
 	currentCommit, err := store.GetCurrentCommit(ctx)
 	if err != nil {
-		debug.Logf("auto-export: failed to get current commit: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: failed to get current commit: %v\n", err)
 		return
 	}
 	if currentCommit == state.LastDoltCommit && state.LastDoltCommit != "" {
@@ -78,7 +78,11 @@ func maybeAutoExport(ctx context.Context) {
 	// Determine output path
 	exportPath := config.GetString("export.path")
 	if exportPath == "" {
-		exportPath = "export.jsonl"
+		if globalFlag {
+			exportPath = "global-issues.jsonl"
+		} else {
+			exportPath = "issues.jsonl"
+		}
 	}
 	fullPath := filepath.Join(beadsDir, exportPath)
 
@@ -92,10 +96,21 @@ func maybeAutoExport(ctx context.Context) {
 	debug.Logf("auto-export: wrote %d issues and %d memories to %s\n",
 		issueCount, memoryCount, fullPath)
 
-	// Optional git add
-	if config.GetBool("export.git-add") {
+	// Don't prime the throttle on an empty export (e.g. immediately after
+	// `bd init`). Saving state here would block the first real `bd create`
+	// from exporting for up to export.interval seconds even though the data
+	// has changed. Remove the empty file too so users don't see a stale 0-byte
+	// issues.jsonl before any issues exist.
+	if issueCount == 0 && memoryCount == 0 {
+		_ = os.Remove(fullPath)
+		return
+	}
+
+	// Optional git add — skip silently when not in a git repo (standalone
+	// BEADS_DIR flow) to avoid noisy "exit status 128" warnings on every write.
+	if config.GetBool("export.git-add") && isGitRepo() {
 		if err := gitAddFile(fullPath); err != nil {
-			debug.Logf("auto-export: git add failed: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Warning: auto-export: git add failed: %v\n", err)
 		}
 	}
 
@@ -161,12 +176,14 @@ func exportToFile(ctx context.Context, path string, includeMemories bool) (issue
 		}
 		labelsMap, _ := store.GetLabelsForIssues(ctx, issueIDs)
 		allDeps, _ := store.GetDependencyRecordsForIssues(ctx, issueIDs)
+		commentsMap, _ := store.GetCommentsForIssues(ctx, issueIDs)
 		commentCounts, _ := store.GetCommentCounts(ctx, issueIDs)
 		depCounts, _ := store.GetDependencyCounts(ctx, issueIDs)
 
 		for _, issue := range issues {
 			issue.Labels = labelsMap[issue.ID]
 			issue.Dependencies = allDeps[issue.ID]
+			issue.Comments = commentsMap[issue.ID]
 		}
 
 		// Write issues
@@ -244,11 +261,11 @@ func saveExportAutoState(beadsDir string, state *exportAutoState) {
 	path := filepath.Join(beadsDir, exportAutoStateFile)
 	data, err := json.Marshal(state)
 	if err != nil {
-		debug.Logf("auto-export: failed to marshal state: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Warning: auto-export: failed to marshal state: %v\n", err)
 		return
 	}
 	if err := os.WriteFile(path, data, 0o600); err != nil {
-		debug.Logf("auto-export: failed to save state: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Warning: auto-export: failed to save state: %v\n", err)
 	}
 }
 

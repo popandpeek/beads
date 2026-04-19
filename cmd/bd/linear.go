@@ -152,6 +152,7 @@ func init() {
 	linearSyncCmd.Flags().Bool("include-ephemeral", false, "Include ephemeral issues (wisps, etc.) when pushing to Linear")
 	linearSyncCmd.Flags().String("parent", "", "Limit push to this beads ticket and its descendants")
 	linearSyncCmd.Flags().StringSlice("team", nil, "Team ID(s) to sync (overrides configured team_id/team_ids)")
+	registerSelectiveSyncFlags(linearSyncCmd)
 
 	linearCmd.AddCommand(linearSyncCmd)
 	linearCmd.AddCommand(linearStatusCmd)
@@ -170,12 +171,7 @@ func runLinearSync(cmd *cobra.Command, args []string) {
 	typeFilters, _ := cmd.Flags().GetStringSlice("type")
 	excludeTypes, _ := cmd.Flags().GetStringSlice("exclude-type")
 	includeEphemeral, _ := cmd.Flags().GetBool("include-ephemeral")
-	parentID, _ := cmd.Flags().GetString("parent")
 	cliTeams, _ := cmd.Flags().GetStringSlice("team")
-
-	if parentID != "" && !push {
-		FatalError("--parent requires --push")
-	}
 
 	if !dryRun {
 		CheckReadonly("linear sync")
@@ -195,9 +191,10 @@ func runLinearSync(cmd *cobra.Command, args []string) {
 
 	ctx := rootCtx
 	teamIDs := getLinearTeamIDs(ctx, cliTeams)
+	willPush := push || !pull
 
 	// Require explicit --team for push when multiple teams are configured.
-	if push && len(teamIDs) > 1 && len(cliTeams) == 0 {
+	if willPush && len(teamIDs) > 1 && len(cliTeams) == 0 {
 		FatalError("push requires explicit --team flag when multiple teams are configured\n" +
 			"Use: bd linear sync --push --team <TEAM_ID>")
 	}
@@ -208,6 +205,11 @@ func runLinearSync(cmd *cobra.Command, args []string) {
 	if err := lt.Init(ctx, store); err != nil {
 		FatalError("initializing Linear tracker: %v", err)
 	}
+	if willPush {
+		if err := lt.ValidatePushStateMappings(ctx); err != nil {
+			FatalError("%v", err)
+		}
+	}
 
 	// Create the sync engine
 	engine := tracker.NewEngine(lt, store, actor)
@@ -216,9 +218,6 @@ func runLinearSync(cmd *cobra.Command, args []string) {
 
 	// Set up Linear-specific pull hooks
 	engine.PullHooks = buildLinearPullHooks(ctx)
-
-	// Set up Linear-specific push hooks
-	engine.PushHooks = buildLinearPushHooks(ctx, lt)
 
 	// Build sync options from CLI flags
 	opts := tracker.SyncOptions{
@@ -239,7 +238,14 @@ func runLinearSync(cmd *cobra.Command, args []string) {
 	if !includeEphemeral {
 		opts.ExcludeEphemeral = true
 	}
-	opts.ParentID = parentID
+
+	if err := applySelectiveSyncFlags(cmd, &opts, push); err != nil {
+		FatalError("%v", err)
+	}
+	allowProjectCreates := opts.ParentID != "" || len(opts.IssueIDs) > 0
+
+	// Set up Linear-specific push hooks
+	engine.PushHooks = buildLinearPushHooks(ctx, lt, allowProjectCreates)
 
 	// Map conflict resolution
 	if preferLocal {
@@ -337,18 +343,22 @@ func buildLinearPullHooks(ctx context.Context) *tracker.PullHooks {
 }
 
 // buildLinearPushHooks creates PushHooks for Linear-specific push behavior.
-func buildLinearPushHooks(ctx context.Context, lt *linear.Tracker) *tracker.PushHooks {
+func buildLinearPushHooks(ctx context.Context, lt *linear.Tracker, allowProjectCreates bool) *tracker.PushHooks {
+	config := lt.MappingConfig()
 	return &tracker.PushHooks{
 		FormatDescription: func(issue *types.Issue) string {
 			return linear.BuildLinearDescription(issue)
 		},
 		ContentEqual: func(local *types.Issue, remote *tracker.TrackerIssue) bool {
-			localComparable := linear.NormalizeIssueForLinearHash(local)
+			remoteIssue, ok := remote.Raw.(*linear.Issue)
+			if ok && remoteIssue != nil {
+				return linear.PushFieldsEqual(local, remoteIssue, config)
+			}
 			remoteConv := lt.FieldMapper().IssueToBeads(remote)
 			if remoteConv == nil || remoteConv.Issue == nil {
 				return false
 			}
-			return localComparable.ComputeContentHash() == remoteConv.Issue.ComputeContentHash()
+			return linear.PushFieldsEqualToBeads(local, remoteConv.Issue)
 		},
 		BuildStateCache: func(ctx context.Context) (interface{}, error) {
 			return linear.BuildStateCacheFromTracker(ctx, lt)
@@ -362,6 +372,14 @@ func buildLinearPushHooks(ctx context.Context, lt *linear.Tracker) *tracker.Push
 			return id, id != ""
 		},
 		ShouldPush: func(issue *types.Issue) bool {
+			if projectID, _ := store.GetConfig(ctx, "linear.project_id"); projectID != "" {
+				if issue.ExternalRef == nil || strings.TrimSpace(*issue.ExternalRef) == "" {
+					if !allowProjectCreates {
+						return false
+					}
+				}
+			}
+
 			// Apply push prefix filtering if configured
 			pushPrefix, _ := store.GetConfig(ctx, "linear.push_prefix")
 			if pushPrefix == "" {
@@ -558,6 +576,21 @@ func maskAPIKey(key string) string {
 // getLinearConfig reads a Linear configuration value. Returns the value and its source.
 // Priority: project config > environment variable.
 func getLinearConfig(ctx context.Context, key string) (value string, source string) {
+	// Secret keys (e.g. linear.api_key) are stored in config.yaml, not the
+	// Dolt database, to avoid leaking secrets when pushing to remotes.
+	if config.IsYamlOnlyKey(key) {
+		if value := config.GetString(key); value != "" {
+			return value, "project config (config.yaml)"
+		}
+		envKey := linearConfigToEnvVar(key)
+		if envKey != "" {
+			if value := os.Getenv(envKey); value != "" {
+				return value, fmt.Sprintf("environment variable (%s)", envKey)
+			}
+		}
+		return "", ""
+	}
+
 	// Try to read from store (works in direct mode)
 	if store != nil {
 		value, _ = store.GetConfig(ctx, key) // Best effort: empty value is valid fallback

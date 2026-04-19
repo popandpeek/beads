@@ -36,7 +36,7 @@ Variable syntax (both work - we detect which side is the concrete value):
   --var feature-auth=branch    Substitution-style: value=variable
 
 Output locations (first writable wins):
-  1. .beads/formulas/       (project-level, default)
+  1. <resolved-beads-dir>/formulas/ (project-level, default)
   2. ~/.beads/formulas/     (user-level, if project not writable)
 
 Examples:
@@ -156,7 +156,11 @@ func runMolDistill(cmd *cobra.Command, args []string) {
 		// Find first writable formula directory
 		outputPath = findWritableFormulaDir(formulaName)
 		if outputPath == "" {
-			FatalErrorWithHint("no writable formula directory found", "Try: mkdir -p .beads/formulas")
+			hint := "Try creating one of the formula search paths"
+			if searchPaths := getFormulaSearchPaths(); len(searchPaths) > 0 {
+				hint = fmt.Sprintf("Try: mkdir -p %s", searchPaths[0])
+			}
+			FatalErrorWithHint("no writable formula directory found", hint)
 		}
 	}
 
@@ -261,11 +265,13 @@ func getVarNames(replacements map[string]string) []string {
 
 // subgraphToFormula converts a molecule subgraph to a formula
 func subgraphToFormula(subgraph *TemplateSubgraph, name string, replacements map[string]string) *formula.Formula {
-	// Helper to apply replacements
+	// Helper to apply replacements. Uses word-boundary regex to avoid
+	// substring corruption (e.g., "4" matching inside "404").
 	applyReplacements := func(text string) string {
 		result := text
 		for value, varName := range replacements {
-			result = strings.ReplaceAll(result, value, "{{"+varName+"}}")
+			pattern := regexp.MustCompile(`\b` + regexp.QuoteMeta(value) + `\b`)
+			result = pattern.ReplaceAllString(result, "{{"+varName+"}}")
 		}
 		return result
 	}

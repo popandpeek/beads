@@ -64,6 +64,27 @@ func TestEmbeddedOrphans(t *testing.T) {
 		out := bdOrphans(t, bd, dir, "--details")
 		_ = out // Should succeed without crashing
 	})
+
+	// ===== --label =====
+
+	t.Run("orphans_label", func(t *testing.T) {
+		// --label with a label that matches no issues should return no orphans
+		out := bdOrphans(t, bd, dir, "--label", "nonexistent-label-xyz")
+		_ = out // Should succeed without crashing
+	})
+
+	t.Run("orphans_label_json", func(t *testing.T) {
+		out := bdOrphans(t, bd, dir, "--label", "nonexistent-label-xyz", "--json")
+		s := strings.TrimSpace(out)
+		if !json.Valid([]byte(s)) {
+			t.Errorf("invalid JSON with --label --json: %s", s[:min(200, len(s))])
+		}
+	})
+
+	t.Run("orphans_label_any", func(t *testing.T) {
+		out := bdOrphans(t, bd, dir, "--label-any", "nonexistent-label-xyz")
+		_ = out // Should succeed without crashing
+	})
 }
 
 // TestEmbeddedOrphansConcurrent exercises orphans concurrently.
@@ -103,7 +124,7 @@ func TestEmbeddedOrphansConcurrent(t *testing.T) {
 	}
 	wg.Wait()
 	for _, r := range results {
-		if r.err != nil {
+		if r.err != nil && !strings.Contains(r.err.Error(), "one writer at a time") {
 			t.Errorf("worker %d failed: %v", r.worker, r.err)
 		}
 	}

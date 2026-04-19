@@ -28,6 +28,10 @@ var ErrNotInitialized = errors.New("database not initialized")
 // ErrPrefixMismatch is returned when an issue ID does not match the configured prefix.
 var ErrPrefixMismatch = errors.New("prefix mismatch")
 
+// ErrStaleUpdate is returned when an --if-match token does not match the
+// current updated_at of the issue (optimistic locking conflict).
+var ErrStaleUpdate = errors.New("stale update: issue was modified since last read")
+
 // Storage is the interface satisfied by *dolt.DoltStore.
 // Consumers depend on this interface rather than on the concrete type so that
 // alternative implementations (mocks, proxies, etc.) can be substituted.
@@ -83,6 +87,12 @@ type Storage interface {
 	SetConfig(ctx context.Context, key, value string) error
 	GetConfig(ctx context.Context, key string) (string, error)
 	GetAllConfig(ctx context.Context) (map[string]string, error)
+
+	// Local metadata operations (dolt-ignored, clone-local state).
+	// Used for tip timestamps, version stamps, tracker sync cursors, etc.
+	// Data is ephemeral — callers must handle ("", nil) as the normal case.
+	SetLocalMetadata(ctx context.Context, key, value string) error
+	GetLocalMetadata(ctx context.Context, key string) (string, error)
 
 	// Transactions
 	RunInTransaction(ctx context.Context, commitMsg string, fn func(tx Transaction) error) error
@@ -264,6 +274,12 @@ type Transaction interface {
 	// Metadata operations (for internal state like import hashes)
 	SetMetadata(ctx context.Context, key, value string) error
 	GetMetadata(ctx context.Context, key string) (string, error)
+
+	// Local metadata operations (dolt-ignored, clone-local state).
+	// Used for tip timestamps, version stamps, tracker sync cursors, etc.
+	// Data is ephemeral — callers must handle ("", nil) as the normal case.
+	SetLocalMetadata(ctx context.Context, key, value string) error
+	GetLocalMetadata(ctx context.Context, key string) (string, error)
 
 	// Comment operations
 	AddComment(ctx context.Context, issueID, actor, comment string) error

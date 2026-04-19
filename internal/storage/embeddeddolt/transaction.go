@@ -126,7 +126,23 @@ func (t *embeddedTransaction) GetLabels(ctx context.Context, issueID string) ([]
 
 func (t *embeddedTransaction) SetConfig(ctx context.Context, key, value string) error {
 	t.dirty.MarkDirty("config")
-	return issueops.SetConfigInTx(ctx, t.tx, key, value)
+	if err := issueops.SetConfigInTx(ctx, t.tx, key, value); err != nil {
+		return err
+	}
+	// Sync normalized tables when config keys change
+	switch key {
+	case "status.custom":
+		t.dirty.MarkDirty("custom_statuses")
+		if err := issueops.SyncCustomStatusesTable(ctx, t.tx, value); err != nil {
+			return fmt.Errorf("syncing custom_statuses table: %w", err)
+		}
+	case "types.custom":
+		t.dirty.MarkDirty("custom_types")
+		if err := issueops.SyncCustomTypesTable(ctx, t.tx, value); err != nil {
+			return fmt.Errorf("syncing custom_types table: %w", err)
+		}
+	}
+	return nil
 }
 
 func (t *embeddedTransaction) GetConfig(ctx context.Context, key string) (string, error) {
@@ -140,6 +156,14 @@ func (t *embeddedTransaction) SetMetadata(ctx context.Context, key, value string
 
 func (t *embeddedTransaction) GetMetadata(ctx context.Context, key string) (string, error) {
 	return issueops.GetMetadataInTx(ctx, t.tx, key)
+}
+
+func (t *embeddedTransaction) SetLocalMetadata(ctx context.Context, key, value string) error {
+	return issueops.SetLocalMetadataInTx(ctx, t.tx, key, value)
+}
+
+func (t *embeddedTransaction) GetLocalMetadata(ctx context.Context, key string) (string, error) {
+	return issueops.GetLocalMetadataInTx(ctx, t.tx, key)
 }
 
 func (t *embeddedTransaction) AddComment(ctx context.Context, issueID, actor, comment string) error {

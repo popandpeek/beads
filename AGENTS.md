@@ -9,6 +9,7 @@ This file exists for compatibility with tools that look for AGENTS.md.
 - **Issue Tracking** - How to use bd for work management
 - **Development Guidelines** - Code standards and testing
 - **Visual Design System** - Status icons, colors, and semantic styling for CLI output
+- **Contributor Protection** - Read [CONTRIBUTING.md](CONTRIBUTING.md) before handling external PRs
 
 ## Visual Design Anti-Patterns
 
@@ -40,12 +41,12 @@ echo 'Updated text' | bd update <id> --description=-
 ## Testing Commands (No Ambiguity)
 
 - Default local test command: `make test` (or `./scripts/test.sh`).
-- Full CGO-enabled suite: `make test-full-cgo` (or `./scripts/test-cgo.sh ./...`).
-- On macOS, do **not** run raw `CGO_ENABLED=1 go test ./...` unless ICU flags are set; use the script/Make target above.
-- If you need package- or test-scoped CGO runs:
+- Opt-in ICU regex path: `make test-icu-path` (or `./scripts/test-icu-path.sh ./...`).
+- This ICU path is maintainer-only and not part of normal validation; `make test-full-cgo` and `./scripts/test-cgo.sh` are deprecated aliases.
+- For package- or test-scoped shipped-config CGO runs, prefer:
 ```bash
-./scripts/test-cgo.sh ./cmd/bd/...
-./scripts/test-cgo.sh -run '^TestName$' ./cmd/bd/...
+CGO_ENABLED=1 go test -tags gms_pure_go ./cmd/bd/...
+CGO_ENABLED=1 go test -tags gms_pure_go -run '^TestName$' ./cmd/bd/...
 ```
 
 ## Non-Interactive Shell Commands

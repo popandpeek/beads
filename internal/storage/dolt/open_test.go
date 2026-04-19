@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -71,11 +72,11 @@ func TestResolveAutoStart(t *testing.T) {
 			wantAutoStart: true,
 		},
 		{
-			// Caller option wins over config.yaml per NewFromConfigWithOptions contract.
-			name:             "caller true wins over config.yaml opt-out",
+			// Config opt-out must still win when callers pass current=true.
+			name:             "config.yaml opt-out wins over caller true",
 			currentValue:     true,
 			doltAutoStartCfg: "false",
-			wantAutoStart:    true,
+			wantAutoStart:    false,
 		},
 		{
 			name:          "test mode overrides caller true",
@@ -102,6 +103,41 @@ func TestResolveAutoStart(t *testing.T) {
 					tc.currentValue, tc.doltAutoStartCfg, got, tc.wantAutoStart)
 			}
 		})
+	}
+}
+
+func TestCLIDirUsesSharedDoltRootInSharedServerMode(t *testing.T) {
+	sharedRoot := t.TempDir()
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	t.Setenv("BEADS_SHARED_SERVER_DIR", sharedRoot)
+
+	store := &DoltStore{
+		serverMode: true,
+		beadsDir:   filepath.Join(t.TempDir(), ".beads"),
+		dbPath:     filepath.Join(t.TempDir(), ".beads", "dolt"),
+		database:   "shared_db",
+	}
+
+	want := filepath.Join(sharedRoot, "dolt", "shared_db")
+	if got := store.CLIDir(); got != want {
+		t.Fatalf("CLIDir() = %q, want %q", got, want)
+	}
+}
+
+func TestCLIDirUsesDbPathOutsideSharedServerMode(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "0")
+
+	dbPath := filepath.Join(t.TempDir(), ".beads", "dolt")
+	store := &DoltStore{
+		serverMode: true,
+		beadsDir:   filepath.Join(t.TempDir(), ".beads"),
+		dbPath:     dbPath,
+		database:   "local_db",
+	}
+
+	want := filepath.Join(dbPath, "local_db")
+	if got := store.CLIDir(); got != want {
+		t.Fatalf("CLIDir() = %q, want %q", got, want)
 	}
 }
 

@@ -34,6 +34,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/lockfile"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
 // ErrServerNotRunning is returned by Stop when the Dolt server is not running.
@@ -87,6 +88,18 @@ const maxEphemeralPortAttempts = 10
 // Uses 3308 to avoid conflict with the orchestrator which uses 3307.
 const DefaultSharedServerPort = 3308
 
+// GlobalDatabaseName is the SQL database name for the project-agnostic
+// global issue database in shared-server mode.
+const GlobalDatabaseName = "beads_global"
+
+// GlobalIssuePrefix is the issue prefix used in the global database.
+const GlobalIssuePrefix = "global"
+
+// GlobalProjectID is the well-known sentinel UUID for the global database.
+// Used for project identity verification — the global DB doesn't belong to
+// any single project, so it uses this fixed value instead of a random UUID.
+const GlobalProjectID = "00000000-0000-0000-0000-000000000000"
+
 // IsSharedServerMode returns true if shared server mode is enabled.
 // Checks (in priority order):
 //  1. BEADS_DOLT_SHARED_SERVER env var ("1" or "true")
@@ -134,14 +147,42 @@ func isFalsyBool(s string) bool {
 	return err == nil && !b
 }
 
+// readyTimeout returns the timeout used by waitForReady when starting the
+// dolt sql-server. Defaults to 10 seconds, but can be overridden via the
+// BEADS_DOLT_READY_TIMEOUT environment variable (positive integer seconds).
+// First-run Dolt SQL engine initialization can take ~60s on slower hardware
+// where the privileges.db, stats subrepo, and other bootstrap work must
+// happen before the MySQL listener accepts TCP connections. See GH#3142.
+func readyTimeout() time.Duration {
+	const defaultTimeout = 10 * time.Second
+	v := strings.TrimSpace(os.Getenv("BEADS_DOLT_READY_TIMEOUT"))
+	if v == "" {
+		return defaultTimeout
+	}
+	secs, err := strconv.Atoi(v)
+	if err != nil || secs < 1 {
+		fmt.Fprintf(os.Stderr,
+			"Warning: BEADS_DOLT_READY_TIMEOUT=%q is not a positive integer; using default %s\n",
+			v, defaultTimeout)
+		return defaultTimeout
+	}
+	return time.Duration(secs) * time.Second
+}
+
 // SharedServerDir returns the directory for shared server state files.
 // Returns ~/.beads/shared-server/ (created on first use).
+// Override with BEADS_SHARED_SERVER_DIR env var for testing or custom layouts.
 func SharedServerDir() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("cannot determine home directory: %w", err)
+	var dir string
+	if d := os.Getenv("BEADS_SHARED_SERVER_DIR"); d != "" {
+		dir = d
+	} else {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("cannot determine home directory: %w", err)
+		}
+		dir = filepath.Join(home, ".beads", "shared-server")
 	}
-	dir := filepath.Join(home, ".beads", "shared-server")
 	if err := os.MkdirAll(dir, config.BeadsDirPerm); err != nil {
 		return "", fmt.Errorf("cannot create shared server directory %s: %w", dir, err)
 	}
@@ -559,11 +600,53 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 			"  To check status: bd dolt status", cfg.Port)
 	}
 
+	// Defense-in-depth: if dolt.auto-start is explicitly disabled in
+	// config.yaml or env, never spawn a server even if the caller
+	// somehow reached this point (e.g. stale AutoStart=true in config).
+	if IsAutoStartDisabled() {
+		cfg := DefaultConfig(beadsDir)
+		return 0, false, fmt.Errorf("Dolt server unreachable (port %d) and auto-start is disabled "+
+			"(dolt.auto-start: false in config.yaml or BEADS_DOLT_AUTO_START=0).\n\n"+
+			"Start the server manually or enable auto-start.\n"+
+			"  To start manually: bd dolt start\n"+
+			"  To check status: bd dolt status", cfg.Port)
+	}
+
 	s, err := Start(serverDir)
 	if err != nil {
 		return 0, false, err
 	}
 	return s.Port, true, nil
+}
+
+// doltServerLogLevel is the --loglevel value passed to `dolt sql-server`.
+//
+// Dolt's sql-server logs every new connection and connection close at INFO
+// level (`msg=NewConnection` / `msg=ConnectionClosed`). Because beads opens
+// a fresh MySQL connection for each `bd` invocation, a busy project can
+// produce millions of lines of connection churn noise, which in one field
+// report filled dolt-server.log with ~380 MB of useless entries, generated
+// significant btrfs write pressure, and buried real error signals.
+//
+// Raising the floor to `warning` silences that chatter while still surfacing
+// warnings, errors, and fatal messages. Valid dolt levels are:
+// trace, debug, info, warning, error, fatal.
+const doltServerLogLevel = "warning"
+
+// buildDoltServerArgs returns the argv passed to `dolt sql-server`
+// (excluding argv[0]/the binary itself). It is factored out of Start so it
+// can be asserted on in unit tests without spawning a real server.
+//
+// The `--loglevel` flag MUST be included here — see doltServerLogLevel for
+// the rationale. If you remove or reorder these args, update the tests in
+// doltserver_test.go accordingly.
+func buildDoltServerArgs(host string, port int) []string {
+	return []string{
+		"sql-server",
+		"-H", host,
+		"-P", strconv.Itoa(port),
+		"--loglevel=" + doltServerLogLevel,
+	}
 }
 
 // Start explicitly starts a dolt sql-server for the project.
@@ -628,100 +711,128 @@ func Start(beadsDir string) (*State, error) {
 		return nil, fmt.Errorf("configuring dolt identity: %w", err)
 	}
 
-	// Ensure dolt database directory is initialized
-	if err := ensureDoltInit(doltDir); err != nil {
-		return nil, fmt.Errorf("initializing dolt database: %w", err)
-	}
-
-	// Open log file
-	logFile, err := os.OpenFile(logPath(beadsDir), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600) //nolint:gosec // G304: logPath derives from user-configured beadsDir
-	if err != nil {
-		return nil, fmt.Errorf("opening log file: %w", err)
-	}
-
-	// Resolve the port to use. Explicit ports (env/config) go through
-	// reclaimPort for conflict detection. Port 0 means ephemeral — allocate
-	// a fresh port from the OS with retry for TOCTOU races.
-	actualPort := cfg.Port
-	explicitPort := actualPort > 0
-
-	if explicitPort {
-		// Explicit port: check for conflicts and adopt existing servers.
-		adoptPID, reclaimErr := reclaimPort(cfg.Host, actualPort, beadsDir)
-		if reclaimErr != nil {
-			_ = logFile.Close()
-			return nil, fmt.Errorf("cannot start dolt server on port %d: %w", actualPort, reclaimErr)
+	// Launch dolt sql-server, retrying once after an automatic corrupt-
+	// manifest recovery (GH#3290).
+	var (
+		pid               int
+		actualPort        int
+		lastErr           error
+		attempts          int
+		recoveryAttempted bool
+	)
+startupLoop:
+	for {
+		// Ensure dolt database directory is initialized
+		if err := ensureDoltInit(doltDir); err != nil {
+			return nil, fmt.Errorf("initializing dolt database: %w", err)
 		}
-		if adoptPID > 0 {
-			_ = logFile.Close()
-			_ = os.WriteFile(pidPath(beadsDir), []byte(strconv.Itoa(adoptPID)), 0600)
-			_ = writePortFile(beadsDir, actualPort)
-			return &State{Running: true, PID: adoptPID, Port: actualPort, DataDir: doltDir}, nil
+
+		// Rotate the log if it has grown past the configured ceiling. This is a
+		// startup-only check — dolt owns the fd directly once launched, so we can
+		// only intervene between runs. See logrotate.go for the caveat discussion.
+		maybeRotateLog(beadsDir)
+
+		// Open log file
+		logFile, err := os.OpenFile(logPath(beadsDir), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600) //nolint:gosec // G304: logPath derives from user-configured beadsDir
+		if err != nil {
+			return nil, fmt.Errorf("opening log file: %w", err)
 		}
-	}
 
-	// Start dolt sql-server, with retry loop for ephemeral port TOCTOU.
-	var pid int
-	var lastErr error
-	attempts := 1
-	if !explicitPort {
-		attempts = maxEphemeralPortAttempts
-	}
+		// Resolve the port to use. Explicit ports (env/config) go through
+		// reclaimPort for conflict detection. Port 0 means ephemeral — allocate
+		// a fresh port from the OS with retry for TOCTOU races.
+		actualPort = cfg.Port
+		explicitPort := actualPort > 0
 
-	for i := range attempts {
-		if !explicitPort {
-			p, allocErr := allocateEphemeralPort(cfg.Host)
-			if allocErr != nil {
-				lastErr = allocErr
-				continue
+		if explicitPort {
+			// Explicit port: check for conflicts and adopt existing servers.
+			adoptPID, reclaimErr := reclaimPort(cfg.Host, actualPort, beadsDir)
+			if reclaimErr != nil {
+				_ = logFile.Close()
+				return nil, fmt.Errorf("cannot start dolt server on port %d: %w", actualPort, reclaimErr)
 			}
-			actualPort = p
-		}
-
-		cmd := exec.Command(doltBin, "sql-server", //nolint:gosec // doltBin is resolved from PATH, not user input
-			"-H", cfg.Host,
-			"-P", strconv.Itoa(actualPort),
-		)
-		cmd.Dir = doltDir
-		cmd.Stdout = logFile
-		cmd.Stderr = logFile
-		cmd.Stdin = nil
-		cmd.SysProcAttr = procAttrDetached()
-		cmd.Env = os.Environ()
-
-		if startErr := cmd.Start(); startErr != nil {
-			lastErr = startErr
-			if !explicitPort {
-				continue // retry with a new ephemeral port
+			if adoptPID > 0 {
+				_ = logFile.Close()
+				_ = os.WriteFile(pidPath(beadsDir), []byte(strconv.Itoa(adoptPID)), 0600)
+				_ = writePortFile(beadsDir, actualPort)
+				return &State{Running: true, PID: adoptPID, Port: actualPort, DataDir: doltDir}, nil
 			}
-			_ = logFile.Close()
-			return nil, fmt.Errorf("starting dolt sql-server: %w", startErr)
 		}
 
-		pid = cmd.Process.Pid
-		_ = cmd.Process.Release()
-
-		// Quick check: did the process exit immediately (bind failure)?
-		// Give it a moment to fail on port bind before proceeding.
-		time.Sleep(200 * time.Millisecond)
-		if !isProcessAlive(pid) {
-			lastErr = fmt.Errorf("dolt sql-server exited immediately on port %d (attempt %d/%d)", actualPort, i+1, attempts)
-			pid = 0
-			if !explicitPort {
-				continue
-			}
-			_ = logFile.Close()
-			return nil, lastErr
-		}
-
+		// Start dolt sql-server, with retry loop for ephemeral port TOCTOU.
+		pid = 0
 		lastErr = nil
-		break
-	}
-	_ = logFile.Close()
+		attempts = 1
+		if !explicitPort {
+			attempts = maxEphemeralPortAttempts
+		}
 
-	if lastErr != nil {
-		return nil, fmt.Errorf("failed to start dolt server after %d attempts: %w\nCheck logs: %s",
-			attempts, lastErr, logPath(beadsDir))
+		for i := range attempts {
+			if !explicitPort {
+				p, allocErr := allocateEphemeralPort(cfg.Host)
+				if allocErr != nil {
+					lastErr = allocErr
+					continue
+				}
+				actualPort = p
+			}
+
+			cmd := exec.Command(doltBin, buildDoltServerArgs(cfg.Host, actualPort)...) //nolint:gosec // doltBin is resolved from PATH, not user input
+			cmd.Dir = doltDir
+			cmd.Stdout = logFile
+			cmd.Stderr = logFile
+			cmd.Stdin = nil
+			cmd.SysProcAttr = procAttrDetached()
+			cmd.Env = os.Environ()
+
+			if startErr := cmd.Start(); startErr != nil {
+				lastErr = startErr
+				if !explicitPort {
+					continue // retry with a new ephemeral port
+				}
+				break
+			}
+
+			pid = cmd.Process.Pid
+			_ = cmd.Process.Release()
+
+			// Quick check: did the process exit immediately (bind failure)?
+			// Give it a moment to fail on port bind before proceeding.
+			time.Sleep(200 * time.Millisecond)
+			if !isProcessAlive(pid) {
+				lastErr = fmt.Errorf("dolt sql-server exited immediately on port %d (attempt %d/%d)", actualPort, i+1, attempts)
+				pid = 0
+				if !explicitPort {
+					continue
+				}
+				break
+			}
+
+			lastErr = nil
+			break
+		}
+		_ = logFile.Close()
+
+		if lastErr != nil {
+			// GH#3290: detect unclean-shutdown manifest corruption and auto-
+			// recover when the journal is empty (no data to lose). Recovery
+			// backs up the corrupt .dolt/ with a timestamped suffix and
+			// reinitializes in place, then the outer loop retries startup.
+			if !recoveryAttempted {
+				recoveryAttempted = true
+				if backups, recErr := recoverCorruptManifest(beadsDir, doltDir); recErr != nil {
+					fmt.Fprintf(os.Stderr, "Warning: corrupt manifest recovery failed: %v\n", recErr)
+				} else if len(backups) > 0 {
+					for _, b := range backups {
+						fmt.Fprintf(os.Stderr, "Info: backed up corrupt dolt database to %s and reinitialized (GH#3290)\n", filepath.Base(b))
+					}
+					continue startupLoop
+				}
+			}
+			return nil, fmt.Errorf("failed to start dolt server after %d attempts: %w\nCheck logs: %s",
+				attempts, lastErr, logPath(beadsDir))
+		}
+		break
 	}
 
 	// Write PID and port files
@@ -740,7 +851,7 @@ func Start(beadsDir string) (*State, error) {
 	}
 
 	// Wait for server to accept connections
-	if err := waitForReady(cfg.Host, actualPort, 10*time.Second); err != nil {
+	if err := waitForReady(cfg.Host, actualPort, readyTimeout()); err != nil {
 		if proc, findErr := os.FindProcess(pid); findErr == nil {
 			_ = proc.Kill()
 		}
@@ -758,6 +869,48 @@ func Start(beadsDir string) (*State, error) {
 	}, nil
 }
 
+// EnsureGlobalDatabase connects to the shared Dolt server and creates the
+// beads_global database if it doesn't already exist. This is idempotent and
+// safe to call on every shared server init. Schema initialization and config
+// seeding (issue prefix, project ID) are handled by the store layer when the
+// global database is first opened with CreateIfMissing=true.
+//
+// Returns nil if the database already exists or was successfully created.
+func EnsureGlobalDatabase(host string, port int, user, password string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	dsn := doltutil.ServerDSN{
+		Host:     host,
+		Port:     port,
+		User:     user,
+		Password: password,
+	}.String()
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		return fmt.Errorf("ensure global db: failed to open connection: %w", err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	db.SetConnMaxLifetime(10 * time.Second)
+
+	if err := db.PingContext(ctx); err != nil {
+		return fmt.Errorf("ensure global db: server not reachable: %w", err)
+	}
+
+	// CREATE DATABASE IF NOT EXISTS is idempotent — safe on every call.
+	// GlobalDatabaseName is a constant ("beads_global"), not user input.
+	_, err = db.ExecContext(ctx, fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`", GlobalDatabaseName)) //nolint:gosec // G201: constant database name
+	if err != nil {
+		errLower := strings.ToLower(err.Error())
+		if !strings.Contains(errLower, "database exists") && !strings.Contains(errLower, "1007") {
+			return fmt.Errorf("ensure global db: failed to create %s: %w", GlobalDatabaseName, err)
+		}
+	}
+
+	return nil
+}
+
 // FlushWorkingSet connects to the running Dolt server and commits any uncommitted
 // working set changes across all databases. This prevents data loss when the server
 // is about to be stopped or restarted. Returns nil if there's nothing to flush or
@@ -766,7 +919,11 @@ func FlushWorkingSet(host string, port int) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	dsn := fmt.Sprintf("root@tcp(%s:%d)/?parseTime=true", host, port)
+	dsn := doltutil.ServerDSN{
+		Host: host,
+		Port: port,
+		User: "root",
+	}.String()
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		return fmt.Errorf("flush: failed to open connection: %w", err)
@@ -839,7 +996,6 @@ func FlushWorkingSet(host string, port int) error {
 	return nil
 }
 
-// Stop gracefully stops the managed server and its idle monitor.
 // Stop is idempotent: when the server is already stopped it returns
 // ErrServerNotRunning after cleaning up any leftover state files.
 // Callers should use errors.Is(err, ErrServerNotRunning) to distinguish
@@ -850,7 +1006,6 @@ func Stop(beadsDir string) error {
 
 // StopWithForce is like Stop but with an optional force flag.
 func StopWithForce(beadsDir string, force bool) error {
-
 	state, err := IsRunning(beadsDir)
 	if err != nil {
 		return err

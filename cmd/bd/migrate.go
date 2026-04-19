@@ -56,11 +56,11 @@ Subcommands:
 			if jsonOutput {
 				outputJSON(map[string]interface{}{
 					"error":   "no_beads_directory",
-					"message": "No .beads directory found. " + diagHint() + ".",
+					"message": activeWorkspaceNotFoundMessage() + " " + diagHint() + ".",
 				})
 				os.Exit(1)
 			} else {
-				FatalErrorWithHint("no .beads directory found", diagHint())
+				FatalErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
 			}
 		}
 
@@ -99,7 +99,7 @@ func handleDoltMetadataUpdate(cfg *configfile.Config, dryRun bool) {
 	}
 
 	// Check current state of all metadata fields
-	currentVersion, _ := store.GetMetadata(ctx, "bd_version")
+	currentVersion, _ := store.GetLocalMetadata(ctx, "bd_version")
 	currentRepoID, _ := store.GetMetadata(ctx, "repo_id")
 	currentCloneID, _ := store.GetMetadata(ctx, "clone_id")
 
@@ -179,7 +179,7 @@ func handleDoltMetadataUpdate(cfg *configfile.Config, dryRun bool) {
 		}
 
 		// Update version metadata (fatal on failure — version is critical)
-		if err := store.SetMetadata(ctx, "bd_version", Version); err != nil {
+		if err := store.SetLocalMetadata(ctx, "bd_version", Version); err != nil {
 			if jsonOutput {
 				outputJSON(map[string]interface{}{
 					"error":   "version_update_failed",
@@ -404,11 +404,11 @@ func handleInspect() {
 		if jsonOutput {
 			outputJSON(map[string]interface{}{
 				"error":   "no_beads_directory",
-				"message": "No .beads directory found. " + diagHint() + ".",
+				"message": activeWorkspaceNotFoundMessage() + " " + diagHint() + ".",
 			})
 			os.Exit(1)
 		}
-		FatalErrorWithHint("no .beads directory found", diagHint())
+		FatalErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
 	}
 
 	// Check if database is available via the global store
@@ -448,7 +448,7 @@ func handleInspect() {
 	ctx := rootCtx
 
 	// Get current schema version
-	schemaVersion, err := store.GetMetadata(ctx, "bd_version")
+	schemaVersion, err := store.GetLocalMetadata(ctx, "bd_version")
 	if err != nil {
 		schemaVersion = "unknown"
 	}
@@ -549,11 +549,11 @@ func handleToSeparateBranch(branch string, dryRun bool) {
 		if jsonOutput {
 			outputJSON(map[string]interface{}{
 				"error":   "no_beads_directory",
-				"message": "No .beads directory found. " + diagHint() + ".",
+				"message": activeWorkspaceNotFoundMessage() + " " + diagHint() + ".",
 			})
 			os.Exit(1)
 		}
-		FatalErrorWithHint("no .beads directory found", diagHint())
+		FatalErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
 	}
 
 	store := getStore()
@@ -640,7 +640,7 @@ func handleToSeparateBranch(branch string, dryRun bool) {
 
 // listMigrations returns registered Dolt schema migrations.
 func listMigrations() []string {
-	return dolt.ListMigrations()
+	return dolt.ListCompatMigrations()
 }
 
 // migrateSyncCmd is the "bd migrate sync <branch>" subcommand that

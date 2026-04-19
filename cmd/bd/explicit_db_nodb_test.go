@@ -10,24 +10,56 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/configfile"
 )
 
+// buildBDUnderTest builds the bd binary once per test process and returns the path.
+// Previously each caller built a fresh binary in t.TempDir(), which on slow runners
+// (macOS arm64) took 30-240s each and blew the 10m package timeout when many
+// buildBDUnderTest-using tests ran together.
+var (
+	buildBDOnce sync.Once
+	buildBDPath string
+	buildBDErr  error
+	buildBDDir  string
+)
+
 func buildBDUnderTest(t *testing.T) string {
 	t.Helper()
+	buildBDOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "bd-testbin-*")
+		if err != nil {
+			buildBDErr = err
+			return
+		}
+		buildBDDir = dir
+		binName := "bd"
+		if runtime.GOOS == "windows" {
+			binName = "bd.exe"
+		}
+		buildBDPath = filepath.Join(dir, binName)
+		buildCmd := exec.Command("go", "build", "-tags", "gms_pure_go", "-o", buildBDPath, ".")
+		if out, err := buildCmd.CombinedOutput(); err != nil {
+			buildBDErr = &buildBDError{err: err, output: out}
+			return
+		}
+	})
+	if buildBDErr != nil {
+		t.Fatalf("go build failed: %v", buildBDErr)
+	}
+	return buildBDPath
+}
 
-	binName := "bd"
-	if runtime.GOOS == "windows" {
-		binName = "bd.exe"
-	}
-	binPath := filepath.Join(t.TempDir(), binName)
-	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
-	if out, err := buildCmd.CombinedOutput(); err != nil {
-		t.Fatalf("go build failed: %v\n%s", err, out)
-	}
-	return binPath
+type buildBDError struct {
+	err    error
+	output []byte
+}
+
+func (e *buildBDError) Error() string {
+	return e.err.Error() + "\n" + string(e.output)
 }
 
 func initGitRepo(t *testing.T, dir string) {
@@ -113,6 +145,18 @@ func writeProjectConfig(t *testing.T, beadsDir string, syncRemote string, port i
 	))
 }
 
+// evalPath resolves symlinks in a path for consistent comparison.
+// On macOS, t.TempDir() returns /var/folders/... but binaries resolve
+// it to /private/var/folders/..., causing string comparison failures.
+func evalPath(t *testing.T, path string) string {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%s): %v", path, err)
+	}
+	return resolved
+}
+
 func decodeJSONOutput(t *testing.T, out []byte, target any) {
 	t.Helper()
 	trimmed := strings.TrimSpace(string(out))
@@ -160,7 +204,7 @@ func TestContextUsesExplicitDBFlagForNoDBCommand(t *testing.T) {
 
 	var got map[string]any
 	decodeJSONOutput(t, out, &got)
-	if got["beads_dir"] != beadsDirB {
+	if evalPath(t, got["beads_dir"].(string)) != evalPath(t, beadsDirB) {
 		t.Fatalf("beads_dir = %v, want %s", got["beads_dir"], beadsDirB)
 	}
 	if got["database"] != "repo_b_db" {
@@ -209,7 +253,7 @@ func TestContextUsesBEADSDBForNoDBCommand(t *testing.T) {
 
 	var got map[string]any
 	decodeJSONOutput(t, out, &got)
-	if got["beads_dir"] != beadsDirB {
+	if evalPath(t, got["beads_dir"].(string)) != evalPath(t, beadsDirB) {
 		t.Fatalf("beads_dir = %v, want %s", got["beads_dir"], beadsDirB)
 	}
 	if got["database"] != "repo_b_db" {
@@ -229,7 +273,7 @@ func TestContextUsesBEADSDBDirectoryForNoDBCommand(t *testing.T) {
 
 	var got map[string]any
 	decodeJSONOutput(t, out, &got)
-	if got["beads_dir"] != beadsDirB {
+	if evalPath(t, got["beads_dir"].(string)) != evalPath(t, beadsDirB) {
 		t.Fatalf("beads_dir = %v, want %s", got["beads_dir"], beadsDirB)
 	}
 	if got["database"] != "repo_b_db" {
@@ -249,7 +293,7 @@ func TestContextUsesExplicitDBFlagForExternalDoltDataDir(t *testing.T) {
 
 	var got map[string]any
 	decodeJSONOutput(t, out, &got)
-	if got["beads_dir"] != beadsDirB {
+	if evalPath(t, got["beads_dir"].(string)) != evalPath(t, beadsDirB) {
 		t.Fatalf("beads_dir = %v, want %s", got["beads_dir"], beadsDirB)
 	}
 	if got["database"] != "repo_b_db" {
@@ -274,7 +318,7 @@ func TestContextExplicitDBFlagOverridesBEADSDBForNoDBCommand(t *testing.T) {
 
 	var got map[string]any
 	decodeJSONOutput(t, out, &got)
-	if got["beads_dir"] != beadsDirB {
+	if evalPath(t, got["beads_dir"].(string)) != evalPath(t, beadsDirB) {
 		t.Fatalf("beads_dir = %v, want %s", got["beads_dir"], beadsDirB)
 	}
 	if got["database"] != "repo_b_db" {
@@ -296,7 +340,7 @@ func TestContextBEADSDBOverridesBDDBForNoDBCommand(t *testing.T) {
 
 	var got map[string]any
 	decodeJSONOutput(t, out, &got)
-	if got["beads_dir"] != beadsDirB {
+	if evalPath(t, got["beads_dir"].(string)) != evalPath(t, beadsDirB) {
 		t.Fatalf("beads_dir = %v, want %s", got["beads_dir"], beadsDirB)
 	}
 	if got["database"] != "repo_b_db" {

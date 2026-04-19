@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/routing"
@@ -262,23 +263,18 @@ var createCmd = &cobra.Command{
 		// Handle --dry-run flag (before --rig to ensure it works with cross-rig creation)
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		if dryRun {
-			// Build preview issue
-			var externalRefPtr *string
-			if externalRef != "" {
-				externalRefPtr = &externalRef
-			}
-			previewIssue := &types.Issue{
+			previewIssue := buildCreateIssue(createIssueParams{
+				ID:                 explicitID,
 				Title:              title,
 				Description:        description,
 				Design:             design,
 				AcceptanceCriteria: acceptance,
 				Notes:              notes,
 				SpecID:             specID,
-				Status:             types.StatusOpen,
 				Priority:           priority,
 				IssueType:          types.IssueType(issueType).Normalize(),
 				Assignee:           assignee,
-				ExternalRef:        externalRefPtr,
+				ExternalRef:        externalRef,
 				Ephemeral:          wisp,
 				NoHistory:          noHistory,
 				CreatedBy:          getActorWithGit(),
@@ -288,44 +284,16 @@ var createCmd = &cobra.Command{
 				DueAt:              dueAt,
 				DeferUntil:         deferUntil,
 				Metadata:           metadata,
-				// Event fields
-				EventKind: eventCategory,
-				Actor:     eventActor,
-				Target:    eventTarget,
-				Payload:   eventPayload,
-			}
-			if explicitID != "" {
-				previewIssue.ID = explicitID
-			}
+				EventKind:          eventCategory,
+				Actor:              eventActor,
+				Target:             eventTarget,
+				Payload:            eventPayload,
+			})
 
 			if jsonOutput {
 				outputJSON(previewIssue)
 			} else {
-				idDisplay := previewIssue.ID
-				if idDisplay == "" {
-					idDisplay = "(will be generated)"
-				}
-				fmt.Printf("%s [DRY RUN] Would create issue:\n", ui.RenderWarn("⚠"))
-				fmt.Printf("  ID: %s\n", idDisplay)
-				fmt.Printf("  Title: %s\n", previewIssue.Title)
-				fmt.Printf("  Type: %s\n", previewIssue.IssueType)
-				fmt.Printf("  Priority: P%d\n", previewIssue.Priority)
-				fmt.Printf("  Status: %s\n", previewIssue.Status)
-				if previewIssue.Assignee != "" {
-					fmt.Printf("  Assignee: %s\n", previewIssue.Assignee)
-				}
-				if previewIssue.Description != "" {
-					fmt.Printf("  Description: %s\n", previewIssue.Description)
-				}
-				if len(labels) > 0 {
-					fmt.Printf("  Labels: %s\n", strings.Join(labels, ", "))
-				}
-				if len(deps) > 0 {
-					fmt.Printf("  Dependencies: %s\n", strings.Join(deps, ", "))
-				}
-				if eventCategory != "" {
-					fmt.Printf("  Event category: %s\n", eventCategory)
-				}
+				renderCreateDryRunPreview(previewIssue, labels, deps)
 			}
 			return
 		}
@@ -491,25 +459,18 @@ var createCmd = &cobra.Command{
 			}
 		}
 
-		var externalRefPtr *string
-		if externalRef != "" {
-			externalRefPtr = &externalRef
-		}
-
-		// Direct mode
-		issue := &types.Issue{
-			ID:                 explicitID, // Set explicit ID if provided (empty string if not)
+		issue := buildCreateIssue(createIssueParams{
+			ID:                 explicitID,
 			Title:              title,
 			Description:        description,
 			Design:             design,
 			AcceptanceCriteria: acceptance,
 			Notes:              notes,
 			SpecID:             specID,
-			Status:             types.StatusOpen,
 			Priority:           priority,
 			IssueType:          types.IssueType(issueType).Normalize(),
 			Assignee:           assignee,
-			ExternalRef:        externalRefPtr,
+			ExternalRef:        externalRef,
 			EstimatedMinutes:   estimatedMinutes,
 			Ephemeral:          wisp,
 			NoHistory:          noHistory,
@@ -524,7 +485,7 @@ var createCmd = &cobra.Command{
 			DueAt:              dueAt,
 			DeferUntil:         deferUntil,
 			Metadata:           metadata,
-		}
+		})
 
 		ctx := rootCtx
 
@@ -746,6 +707,98 @@ var createCmd = &cobra.Command{
 	},
 }
 
+type createIssueParams struct {
+	ID                 string
+	Title              string
+	Description        string
+	Design             string
+	AcceptanceCriteria string
+	Notes              string
+	SpecID             string
+	Priority           int
+	IssueType          types.IssueType
+	Assignee           string
+	ExternalRef        string
+	EstimatedMinutes   *int
+	Ephemeral          bool
+	NoHistory          bool
+	CreatedBy          string
+	Owner              string
+	MolType            types.MolType
+	WispType           types.WispType
+	EventKind          string
+	Actor              string
+	Target             string
+	Payload            string
+	DueAt              *time.Time
+	DeferUntil         *time.Time
+	Metadata           json.RawMessage
+}
+
+func buildCreateIssue(params createIssueParams) *types.Issue {
+	var externalRefPtr *string
+	if params.ExternalRef != "" {
+		externalRefPtr = &params.ExternalRef
+	}
+
+	return &types.Issue{
+		ID:                 params.ID,
+		Title:              params.Title,
+		Description:        params.Description,
+		Design:             params.Design,
+		AcceptanceCriteria: params.AcceptanceCriteria,
+		Notes:              params.Notes,
+		SpecID:             params.SpecID,
+		Status:             types.StatusOpen,
+		Priority:           params.Priority,
+		IssueType:          params.IssueType,
+		Assignee:           params.Assignee,
+		ExternalRef:        externalRefPtr,
+		EstimatedMinutes:   params.EstimatedMinutes,
+		Ephemeral:          params.Ephemeral,
+		NoHistory:          params.NoHistory,
+		CreatedBy:          params.CreatedBy,
+		Owner:              params.Owner,
+		MolType:            params.MolType,
+		WispType:           params.WispType,
+		EventKind:          params.EventKind,
+		Actor:              params.Actor,
+		Target:             params.Target,
+		Payload:            params.Payload,
+		DueAt:              params.DueAt,
+		DeferUntil:         params.DeferUntil,
+		Metadata:           params.Metadata,
+	}
+}
+
+func renderCreateDryRunPreview(issue *types.Issue, labels, deps []string) {
+	idDisplay := issue.ID
+	if idDisplay == "" {
+		idDisplay = "(will be generated)"
+	}
+	fmt.Printf("%s [DRY RUN] Would create issue:\n", ui.RenderWarn("⚠"))
+	fmt.Printf("  ID: %s\n", idDisplay)
+	fmt.Printf("  Title: %s\n", issue.Title)
+	fmt.Printf("  Type: %s\n", issue.IssueType)
+	fmt.Printf("  Priority: P%d\n", issue.Priority)
+	fmt.Printf("  Status: %s\n", issue.Status)
+	if issue.Assignee != "" {
+		fmt.Printf("  Assignee: %s\n", issue.Assignee)
+	}
+	if issue.Description != "" {
+		fmt.Printf("  Description: %s\n", issue.Description)
+	}
+	if len(labels) > 0 {
+		fmt.Printf("  Labels: %s\n", strings.Join(labels, ", "))
+	}
+	if len(deps) > 0 {
+		fmt.Printf("  Dependencies: %s\n", strings.Join(deps, ", "))
+	}
+	if issue.EventKind != "" {
+		fmt.Printf("  Event category: %s\n", issue.EventKind)
+	}
+}
+
 func init() {
 	createCmd.Flags().StringP("file", "f", "", "Create multiple issues from markdown file")
 	createCmd.Flags().String("graph", "", "Create a graph of issues with dependencies from JSON plan file")
@@ -827,12 +880,15 @@ func ensureBeadsDirForPath(ctx context.Context, targetPath string, sourceStore s
 	if sourceStore != nil {
 		sourcePrefix, err := sourceStore.GetConfig(ctx, "issue_prefix")
 		if err == nil && sourcePrefix != "" {
+			// Sanitize prefix for SQL database name (same as bd init).
+			dbName := strings.ReplaceAll(sourcePrefix, "-", "_")
+
 			// Open target store temporarily to set prefix.
 			// Use newDoltStore with explicit config since the target .beads
 			// directory was just created and has no metadata.json yet.
 			tempStore, err := newDoltStore(ctx, &dolt.Config{
 				BeadsDir:        beadsDir,
-				Database:        sourcePrefix,
+				Database:        dbName,
 				CreateIfMissing: true,
 			})
 			if err != nil {
@@ -844,6 +900,17 @@ func ensureBeadsDirForPath(ctx context.Context, targetPath string, sourceStore s
 			}
 			if err := tempStore.Close(); err != nil {
 				return fmt.Errorf("failed to close target store: %w", err)
+			}
+
+			// Write metadata.json so newDoltStoreFromConfig can find the
+			// correct database name on subsequent opens (GH#2988).
+			cfg := configfile.DefaultConfig()
+			cfg.Backend = configfile.BackendDolt
+			cfg.DoltDatabase = dbName
+			cfg.DoltMode = configfile.DoltModeEmbedded
+			cfg.ProjectID = configfile.GenerateProjectID()
+			if err := cfg.Save(beadsDir); err != nil {
+				return fmt.Errorf("failed to write metadata.json: %w", err)
 			}
 		}
 	}
