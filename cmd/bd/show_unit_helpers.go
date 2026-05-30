@@ -24,6 +24,7 @@ func validateIssueClosable(id string, issue *types.Issue, force bool) error {
 	return validation.Chain(
 		validation.NotTemplate(),
 		validation.NotPinned(force),
+		validation.NotPolecatReviewClose(force),
 	)(id, issue)
 }
 

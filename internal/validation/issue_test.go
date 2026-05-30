@@ -339,6 +339,73 @@ func TestEpicHasOpenChildren(t *testing.T) {
 	}
 }
 
+func TestNotPolecatReviewClose(t *testing.T) {
+	tests := []struct {
+		name    string
+		issue   *types.Issue
+		force   bool
+		wantErr bool
+	}{
+		{
+			name:    "nil issue passes",
+			issue:   nil,
+			force:   false,
+			wantErr: false,
+		},
+		{
+			name:    "non-polecat assignee passes even in review",
+			issue:   &types.Issue{ID: "bd-test", Status: "in_review", Assignee: "beacon/crew/emmett"},
+			force:   false,
+			wantErr: false,
+		},
+		{
+			name:    "polecat with open status passes",
+			issue:   &types.Issue{ID: "bd-test", Status: types.StatusOpen, Assignee: "beacon/polecats/quartz"},
+			force:   false,
+			wantErr: false,
+		},
+		{
+			name:    "polecat with in_review status blocked",
+			issue:   &types.Issue{ID: "bd-test", Status: "in_review", Assignee: "beacon/polecats/quartz"},
+			force:   false,
+			wantErr: true,
+		},
+		{
+			name:    "polecat with reviewing status blocked",
+			issue:   &types.Issue{ID: "bd-test", Status: "reviewing", Assignee: "beacon/polecats/obsidian"},
+			force:   false,
+			wantErr: true,
+		},
+		{
+			name:    "polecat in_review with force passes",
+			issue:   &types.Issue{ID: "bd-test", Status: "in_review", Assignee: "beacon/polecats/quartz"},
+			force:   true,
+			wantErr: false,
+		},
+		{
+			name:    "different rig polecat in_review also blocked",
+			issue:   &types.Issue{ID: "bd-test", Status: "in_review", Assignee: "lantern/polecats/torch"},
+			force:   false,
+			wantErr: true,
+		},
+		{
+			name:    "polecat with working status passes",
+			issue:   &types.Issue{ID: "bd-test", Status: types.StatusHooked, Assignee: "beacon/polecats/quartz"},
+			force:   false,
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := NotPolecatReviewClose(tt.force)("bd-test", tt.issue)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("NotPolecatReviewClose() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestForUpdate(t *testing.T) {
 	tests := []struct {
 		name    string
