@@ -136,6 +136,14 @@ Examples:
 		// We are explicitly creating a Dolt commit; avoid redundant auto-commit in PersistentPostRun.
 		commandDidExplicitDoltCommit = true
 		if err := store.Commit(ctx, vcCommitMessage); err != nil {
+			if isDoltNothingToCommit(err) {
+				if jsonOutput {
+					outputJSON(map[string]interface{}{"committed": false, "message": "nothing to commit"})
+				} else {
+					fmt.Println("Nothing to commit")
+				}
+				return
+			}
 			FatalErrorRespectJSON("failed to commit: %v", err)
 		}
 

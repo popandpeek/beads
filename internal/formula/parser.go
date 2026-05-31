@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/git"
 )
 
 // Formula file extensions. TOML is preferred, JSON is legacy fallback.
@@ -39,11 +41,12 @@ type Parser struct {
 
 // NewParser creates a new formula parser.
 // searchPaths are directories to search for formulas when resolving extends.
-// Default paths are: .beads/formulas, ~/.beads/formulas, $GT_ROOT/.beads/formulas
+// Default paths are the active beads project's formulas dir, then user-level,
+// then GT_ROOT if configured.
 func NewParser(searchPaths ...string) *Parser {
 	paths := searchPaths
 	if len(paths) == 0 {
-		paths = defaultSearchPaths()
+		paths = DefaultSearchPaths()
 	}
 	return &Parser{
 		searchPaths:    paths,
@@ -53,23 +56,52 @@ func NewParser(searchPaths ...string) *Parser {
 	}
 }
 
-// defaultSearchPaths returns the default formula search paths.
-func defaultSearchPaths() []string {
+// DefaultSearchPaths returns the default formula search paths.
+//
+// The project-level path prefers the resolved beads directory so worktrees with
+// shared/main-repo .beads state search the same formula registry as the rest of
+// the command surface. If no beads project is resolved, fall back to cwd/.beads
+// so formula registries can still be used before a project is initialized.
+func DefaultSearchPaths() []string {
 	var paths []string
 
-	// Project-level formulas
+	addPath := func(path string) {
+		if path == "" {
+			return
+		}
+		for _, existing := range paths {
+			if existing == path {
+				return
+			}
+		}
+		paths = append(paths, path)
+	}
+
+	// Project-level formulas via resolved beads directory.
+	if beadsDir := beads.FindBeadsDir(); beadsDir != "" {
+		addPath(filepath.Join(beadsDir, "formulas"))
+	}
+
+	// Checkout-local formulas should remain discoverable even when the active
+	// beads database resolves to a parent/shared .beads directory. This lets a
+	// repo ship workflow formulas under .beads/formulas without requiring every
+	// maintainer to copy them into ~/.beads.
 	if cwd, err := os.Getwd(); err == nil {
-		paths = append(paths, filepath.Join(cwd, ".beads", "formulas"))
+		checkoutRoot := cwd
+		if repoRoot := git.GetRepoRoot(); repoRoot != "" {
+			checkoutRoot = repoRoot
+		}
+		addPath(filepath.Join(checkoutRoot, ".beads", "formulas"))
 	}
 
 	// User-level formulas
 	if home, err := os.UserHomeDir(); err == nil {
-		paths = append(paths, filepath.Join(home, ".beads", "formulas"))
+		addPath(filepath.Join(home, ".beads", "formulas"))
 	}
 
 	// Orchestrator formulas (via GT_ROOT)
 	if gtRoot := os.Getenv("GT_ROOT"); gtRoot != "" {
-		paths = append(paths, filepath.Join(gtRoot, ".beads", "formulas"))
+		addPath(filepath.Join(gtRoot, ".beads", "formulas"))
 	}
 
 	return paths
@@ -367,6 +399,12 @@ func ExtractVariables(formula *Formula) []string {
 		extract(step.Description)
 		extract(step.Assignee)
 		extract(step.Condition)
+		if step.Gate != nil {
+			extract(step.Gate.Type)
+			extract(step.Gate.ID)
+			extract(step.Gate.AwaitID)
+			extract(step.Gate.Timeout)
+		}
 		for _, child := range step.Children {
 			extractFromStep(child)
 		}

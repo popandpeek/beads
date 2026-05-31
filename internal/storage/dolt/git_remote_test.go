@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/testutil"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -33,7 +35,7 @@ import (
 //     so we avoid it entirely and verify via `dolt sql -q ... -r csv`.
 //
 // Prerequisites:
-//   - dolt >= 1.81.8 (native git remote support)
+//   - dolt >= 1.88.1
 //   - git CLI available
 //
 // Run:
@@ -88,12 +90,7 @@ func setupGitRemote(t *testing.T) *gitRemoteSetup {
 
 	// Initialize beads schema via CLI (mirrors what New() does).
 	// dolt sql in the repo dir already defaults to the repo's database.
-	initSchemaSQL := fmt.Sprintf(`%s
-%s
-%s
-%s
-CALL DOLT_ADD('.');
-CALL DOLT_COMMIT('-Am', 'Genesis: schema and config');`, schema, defaultConfig, readyIssuesView, blockedIssuesView)
+	initSchemaSQL := schema.AllMigrationsSQL() + "\nCALL DOLT_ADD('.');\nCALL DOLT_COMMIT('-Am', 'Genesis: schema and config');"
 	runDoltSQL(t, sourceDir, initSchemaSQL)
 
 	return &gitRemoteSetup{
@@ -470,7 +467,7 @@ func TestGitRemoteRoundTripAllTables(t *testing.T) {
 
 	// Dependency
 	runDoltSQL(t, setup.sourceDir,
-		`INSERT INTO dependencies (issue_id, depends_on_id, type, created_at, created_by) `+
+		`INSERT INTO dependencies (issue_id, depends_on_issue_id, type, created_at, created_by) `+
 			`VALUES ('rt-child', 'rt-parent', 'blocks', NOW(), 'test')`)
 
 	// Config
@@ -531,7 +528,7 @@ func TestGitRemoteRoundTripAllTables(t *testing.T) {
 	}
 
 	// Verify dependency
-	depRows := queryCSV(t, cloneDir, "SELECT depends_on_id FROM dependencies WHERE issue_id = 'rt-child'")
+	depRows := queryCSV(t, cloneDir, "SELECT COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) AS depends_on_id FROM dependencies WHERE issue_id = 'rt-child'")
 	if len(depRows) != 1 {
 		t.Errorf("clone: expected 1 dependency, got %d", len(depRows))
 	} else if depRows[0]["depends_on_id"] != "rt-parent" {
@@ -540,7 +537,7 @@ func TestGitRemoteRoundTripAllTables(t *testing.T) {
 
 	// Verify blocked status (rt-child depends on open rt-parent)
 	blockerCount := queryCount(t, cloneDir,
-		`SELECT COUNT(*) FROM dependencies d JOIN issues i ON d.depends_on_id = i.id `+
+		`SELECT COUNT(*) FROM dependencies d JOIN issues i ON d.depends_on_issue_id = i.id `+
 			`WHERE d.issue_id = 'rt-child' AND i.status IN ('open', 'in_progress')`)
 	if blockerCount != 1 {
 		t.Errorf("clone: expected rt-child to be blocked by 1 issue, got %d", blockerCount)
@@ -765,6 +762,135 @@ func TestGitRemoteEmbeddedHasRemote(t *testing.T) {
 	if has {
 		t.Error("HasRemote('nonexistent') = true, want false")
 	}
+}
+
+// TestGitRemotePushSkipsUserPrePushHook is a regression test for GH#3724.
+//
+// `bd dolt push` shells out to `dolt push`, which in turn runs
+// `git push refs/dolt/data` against the embedded Dolt cache-mirror at
+// `<doltDir>/<db>/.dolt/git-remote-cache/<hash>/repo.git/`. If the user has
+// `init.templateDir` set globally with pre-commit-framework hooks, those
+// templates land in the cache-mirror's `hooks/` dir (because Dolt's
+// internal `git init` honours `init.templateDir`). The user's templated
+// `pre-push` hook then runs `git diff` inside the bare-style cache mirror
+// and fails with `fatal: this operation must be run in a work tree`.
+//
+// This test installs a deliberately failing `pre-push` hook directly into
+// the cache-mirror after the first push materialises it, then performs a
+// second push. With the fix in place, `doltCLIPush` sets
+// `GIT_CONFIG_PARAMETERS='core.hooksPath=/dev/null'` on the dolt
+// subprocess, so the hook is bypassed and the push succeeds. Without the
+// fix, the hook runs and the second push fails.
+//
+// Mirrors PR #3626 / GH#3340 (the commit-side sibling) at the push site.
+func TestGitRemotePushSkipsUserPrePushHook(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("hook script uses POSIX shell; the bug + fix are platform-agnostic but this assertion isn't")
+	}
+
+	store, setup, cleanup := setupEmbeddedGitRemote(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	// First push: materialises the cache-mirror at
+	// <doltDir>/<db>/.dolt/git-remote-cache/<hash>/repo.git/.
+	first := &types.Issue{
+		ID:        "hookpush-001",
+		Title:     "Materialise cache mirror",
+		IssueType: types.TypeTask,
+		Status:    types.StatusOpen,
+		Priority:  2,
+	}
+	if err := store.CreateIssue(ctx, first, "tester"); err != nil {
+		t.Fatalf("first CreateIssue failed: %v", err)
+	}
+	if err := store.Commit(ctx, "Add hookpush-001"); err != nil {
+		t.Fatalf("first Commit failed: %v", err)
+	}
+	if err := store.Push(ctx); err != nil {
+		t.Fatalf("first Push failed (cache-mirror not materialised): %v", err)
+	}
+
+	// Locate the cache-mirror's hooks directory by walking
+	// .dolt/git-remote-cache/<hash>/repo.git/hooks. There is exactly one
+	// such directory per configured git remote.
+	cacheBase := findGitRemoteCacheRepoGit(t, setup.sourceDir)
+	hooksDir := filepath.Join(cacheBase, "hooks")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatalf("mkdir hooks dir: %v", err)
+	}
+
+	// Install a pre-push hook that touches a sentinel and fails. Pre-fix,
+	// the second push fires this hook (because `git push` honours
+	// repo-local `core.hooksPath` defaults) and fails. Post-fix,
+	// `core.hooksPath=/dev/null` from GIT_CONFIG_PARAMETERS suppresses it.
+	sentinel := filepath.Join(setup.baseDir, "pre-push-hook-fired")
+	hookPath := filepath.Join(hooksDir, "pre-push")
+	hookScript := fmt.Sprintf("#!/bin/sh\ntouch %q\necho 'GH#3724: bd-internal git push must not run user pre-push hook' >&2\nexit 1\n",
+		sentinel)
+	if err := os.WriteFile(hookPath, []byte(hookScript), 0o755); err != nil { // #nosec G306 -- hook scripts must be executable
+		t.Fatalf("write pre-push hook: %v", err)
+	}
+
+	// Second push: should succeed despite the failing pre-push hook.
+	second := &types.Issue{
+		ID:        "hookpush-002",
+		Title:     "Push past failing pre-push hook",
+		IssueType: types.TypeTask,
+		Status:    types.StatusOpen,
+		Priority:  2,
+	}
+	if err := store.CreateIssue(ctx, second, "tester"); err != nil {
+		t.Fatalf("second CreateIssue failed: %v", err)
+	}
+	if err := store.Commit(ctx, "Add hookpush-002"); err != nil {
+		t.Fatalf("second Commit failed: %v", err)
+	}
+
+	// Confirm the hook is still in place — guards against the test passing
+	// for the wrong reason if Dolt re-templates the hooks dir between
+	// pushes.
+	if _, err := os.Stat(hookPath); err != nil {
+		t.Fatalf("pre-push hook disappeared between pushes: %v", err)
+	}
+
+	if err := store.Push(ctx); err != nil {
+		t.Fatalf("GH#3724 regression: second Push failed — bd's internal `dolt push` is running the user's pre-push hook against the cache-mirror. doltCLIPush must pass GIT_CONFIG_PARAMETERS='core.hooksPath=/dev/null' to suppress client-side hooks: %v", err)
+	}
+
+	if _, err := os.Stat(sentinel); err == nil {
+		t.Fatalf("GH#3724 regression: pre-push hook executed (sentinel %s exists). bd's internal git push must skip user hooks", sentinel)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("unexpected stat error for sentinel: %v", err)
+	}
+}
+
+// findGitRemoteCacheRepoGit walks doltDir for the single
+// .dolt/git-remote-cache/<hash>/repo.git directory created when a
+// git-protocol remote is pushed. Fails the test if zero or more than one
+// is found.
+func findGitRemoteCacheRepoGit(t *testing.T, doltDir string) string {
+	t.Helper()
+	var matches []string
+	err := filepath.WalkDir(doltDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() && d.Name() == "repo.git" &&
+			strings.Contains(filepath.ToSlash(path), "/.dolt/git-remote-cache/") {
+			matches = append(matches, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", doltDir, err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("expected exactly one git-remote-cache/.../repo.git under %s, got %d: %v", doltDir, len(matches), matches)
+	}
+	return matches[0]
 }
 
 func TestGitRemoteSyncRoundTrip(t *testing.T) {
@@ -1008,9 +1134,7 @@ func findClonedDBName(t *testing.T, doltDir string) string {
 // false when the SQL server reports a git-protocol remote but the CLI directory
 // (dbPath) lacks that remote.
 func TestGitRemoteExternalServerRouting(t *testing.T) {
-	if _, err := exec.LookPath("dolt"); err != nil {
-		t.Skip("dolt not installed, skipping test")
-	}
+	testutil.RequireDoltBinary(t)
 	skipIfNoGit(t)
 
 	baseDir, err := os.MkdirTemp("", "external-server-routing-*")
@@ -1034,12 +1158,7 @@ func TestGitRemoteExternalServerRouting(t *testing.T) {
 	runCmd(t, testdbDir, "dolt", "init", "--name", "test", "--email", "test@test.com")
 	runCmd(t, testdbDir, "dolt", "remote", "add", "origin", "git+https://example.com/test.git")
 
-	initSchemaSQL := fmt.Sprintf(`%s
-%s
-%s
-%s
-CALL DOLT_ADD('.');
-CALL DOLT_COMMIT('-Am', 'Genesis: schema and config');`, schema, defaultConfig, readyIssuesView, blockedIssuesView)
+	initSchemaSQL := schema.AllMigrationsSQL() + "\nCALL DOLT_ADD('.');\nCALL DOLT_COMMIT('-Am', 'Genesis: schema and config');"
 	runDoltSQL(t, testdbDir, initSchemaSQL)
 
 	// Start sql-server from the server root
@@ -1101,7 +1220,7 @@ CALL DOLT_COMMIT('-Am', 'Genesis: schema and config');`, schema, defaultConfig, 
 
 	// SQL sees git+https:// remote in testdb; CLI directory (clientDataDir) has none.
 	// isGitProtocolRemote should return false to route through SQL.
-	require.False(t, store.isGitProtocolRemote(ctx))
+	require.False(t, store.isGitProtocolRemote(ctx, store.remote))
 }
 
 // TestCredentialCLIRoutingE2E verifies that Push succeeds via CLI subprocess
@@ -1117,9 +1236,7 @@ CALL DOLT_COMMIT('-Am', 'Genesis: schema and config');`, schema, defaultConfig, 
 // If the guard fails and falls through to SQL withEnvCredentials, the external
 // server process cannot see the env vars and push fails (SC-001).
 func TestCredentialCLIRoutingE2E(t *testing.T) {
-	if _, err := exec.LookPath("dolt"); err != nil {
-		t.Skip("dolt not installed, skipping test")
-	}
+	testutil.RequireDoltBinary(t)
 	skipIfNoGit(t)
 
 	baseDir, err := os.MkdirTemp("", "credential-cli-routing-e2e-*")
@@ -1158,12 +1275,7 @@ func TestCredentialCLIRoutingE2E(t *testing.T) {
 	// Add remote to server's testdb (so SQL DOLT_REMOTE -v can see it)
 	runCmd(t, testdbDir, "dolt", "remote", "add", "origin", remoteURL)
 
-	initSchemaSQL := fmt.Sprintf(`%s
-%s
-%s
-%s
-CALL DOLT_ADD('.');
-CALL DOLT_COMMIT('-Am', 'Genesis: schema and config');`, schema, defaultConfig, readyIssuesView, blockedIssuesView)
+	initSchemaSQL := schema.AllMigrationsSQL() + "\nCALL DOLT_ADD('.');\nCALL DOLT_COMMIT('-Am', 'Genesis: schema and config');"
 	runDoltSQL(t, testdbDir, initSchemaSQL)
 
 	// 3. Start dolt sql-server from server root
@@ -1232,8 +1344,8 @@ CALL DOLT_COMMIT('-Am', 'Genesis: schema and config');`, schema, defaultConfig, 
 	t.Cleanup(func() { store.Close() })
 
 	// Verify preconditions: not a git-protocol remote, but credentials trigger CLI routing
-	require.False(t, store.isGitProtocolRemote(ctx), "file:// is not git-protocol")
-	require.True(t, store.shouldUseCLIForCredentials(ctx), "should route through CLI for credentials")
+	require.False(t, store.isGitProtocolRemote(ctx, store.remote), "file:// is not git-protocol")
+	require.True(t, store.shouldUseCLIForCredentials(ctx, store.remote, store.mainRemoteCredentials()), "should route through CLI for credentials")
 	require.True(t, store.serverMode, "store should be in server mode")
 
 	// 7. Push should succeed via CLI credential routing

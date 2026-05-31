@@ -1,10 +1,11 @@
 package audit
 
 import (
-	"bufio"
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,6 +19,8 @@ const (
 	FileName = "interactions.jsonl"
 	idPrefix = "int-"
 )
+
+var ensureFileBeforeCreateHook func(string)
 
 // Entry is a generic append-only audit event. It is intentionally flexible:
 // use Kind + typed fields for common cases, and Extra for everything else.
@@ -65,15 +68,17 @@ func EnsureFile() (string, error) {
 	if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
 		return "", fmt.Errorf("failed to create .beads directory: %w", err)
 	}
-	_, statErr := os.Stat(p)
-	if statErr == nil {
+	if ensureFileBeforeCreateHook != nil {
+		ensureFileBeforeCreateHook(p)
+	}
+	f, err := os.OpenFile(p, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644) // nolint:gosec // JSONL is intended to be shared via git across clones/tools.
+	if err == nil {
+		if closeErr := f.Close(); closeErr != nil {
+			return "", fmt.Errorf("failed to close interactions log: %w", closeErr)
+		}
 		return p, nil
 	}
-	if !os.IsNotExist(statErr) {
-		return "", fmt.Errorf("failed to stat interactions log: %w", statErr)
-	}
-	// nolint:gosec // JSONL is intended to be shared via git across clones/tools.
-	if err := os.WriteFile(p, []byte{}, 0644); err != nil {
+	if !errors.Is(err, os.ErrExist) {
 		return "", fmt.Errorf("failed to create interactions log: %w", err)
 	}
 	return p, nil
@@ -112,14 +117,17 @@ func Append(e *Entry) (string, error) {
 	}
 	defer func() { _ = f.Close() }() // Best effort: file close in defer after flush
 
-	bw := bufio.NewWriter(f)
-	enc := json.NewEncoder(bw)
+	// Marshal to a single byte slice and write atomically.
+	// Using bufio.NewWriter could split into multiple write() syscalls,
+	// which interleave under concurrent O_APPEND and corrupt lines.
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
 	if err := enc.Encode(e); err != nil {
-		return "", fmt.Errorf("failed to write interactions log entry: %w", err)
+		return "", fmt.Errorf("failed to marshal interactions log entry: %w", err)
 	}
-	if err := bw.Flush(); err != nil {
-		return "", fmt.Errorf("failed to flush interactions log: %w", err)
+	if _, err := f.Write(buf.Bytes()); err != nil {
+		return "", fmt.Errorf("failed to write interactions log entry: %w", err)
 	}
 
 	return e.ID, nil
@@ -150,7 +158,8 @@ func LogFieldChange(issueID, field, oldValue, newValue, actor, reason string) {
 }
 
 func newID() (string, error) {
-	var b [4]byte
+	// 16 bytes (128-bit) of entropy — birthday probability for 8000 IDs is ~9e-32.
+	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", fmt.Errorf("failed to generate id: %w", err)
 	}

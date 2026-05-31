@@ -18,7 +18,8 @@ func IsAllowedUpdateField(key string) bool {
 		"status": true, "priority": true, "title": true, "assignee": true,
 		"description": true, "design": true, "acceptance_criteria": true, "notes": true,
 		"issue_type": true, "estimated_minutes": true, "external_ref": true, "spec_id": true,
-		"closed_at": true, "close_reason": true, "closed_by_session": true,
+		"started_at": true,
+		"closed_at":  true, "close_reason": true, "closed_by_session": true,
 		"source_repo": true,
 		"sender":      true, "wisp": true, "wisp_type": true, "no_history": true, "pinned": true,
 		"mol_type":       true,
@@ -54,6 +55,34 @@ func ManageClosedAt(oldIssue *types.Issue, updates map[string]interface{}, setCl
 	} else if oldIssue.Status == types.StatusClosed {
 		setClauses = append(setClauses, "closed_at = ?", "close_reason = ?")
 		args = append(args, nil, "")
+	}
+
+	return setClauses, args
+}
+
+// ManageStartedAt auto-sets started_at when transitioning to in_progress.
+// If the issue already has a started_at, it is preserved (not overwritten).
+func ManageStartedAt(oldIssue *types.Issue, updates map[string]interface{}, setClauses []string, args []interface{}) ([]string, []interface{}) {
+	statusVal, hasStatus := updates["status"]
+	_, hasExplicitStartedAt := updates["started_at"]
+	if hasExplicitStartedAt || !hasStatus {
+		return setClauses, args
+	}
+
+	var newStatus string
+	switch v := statusVal.(type) {
+	case string:
+		newStatus = v
+	case types.Status:
+		newStatus = string(v)
+	default:
+		return setClauses, args
+	}
+
+	if newStatus == string(types.StatusInProgress) && oldIssue.StartedAt == nil {
+		now := time.Now().UTC()
+		setClauses = append(setClauses, "started_at = ?")
+		args = append(args, now)
 	}
 
 	return setClauses, args
@@ -97,6 +126,17 @@ type UpdateResult struct {
 //
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
 func UpdateIssueInTx(ctx context.Context, tx *sql.Tx, id string, updates map[string]interface{}, actor string) (*UpdateResult, error) {
+	return updateIssueInTx(ctx, tx, id, updates, actor, true)
+}
+
+// UpdateIssueWithoutEventInTx applies normal update semantics without recording
+// an intermediate event. Demotion uses this to preserve the historical event
+// stream: create/update history is copied, then a single demotion event is added.
+func UpdateIssueWithoutEventInTx(ctx context.Context, tx *sql.Tx, id string, updates map[string]interface{}, actor string) (*UpdateResult, error) {
+	return updateIssueInTx(ctx, tx, id, updates, actor, false)
+}
+
+func updateIssueInTx(ctx context.Context, tx *sql.Tx, id string, updates map[string]interface{}, actor string, recordEvent bool) (*UpdateResult, error) {
 	// Route to correct table.
 	isWisp := IsActiveWispInTx(ctx, tx, id)
 	issueTable, _, eventTable, _ := WispTableRouting(isWisp)
@@ -105,6 +145,22 @@ func UpdateIssueInTx(ctx context.Context, tx *sql.Tx, id string, updates map[str
 	oldIssue, err := GetIssueInTx(ctx, tx, id)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get issue for update: %w", err)
+	}
+
+	// Validate issue_type against built-in + custom types (GH#3030).
+	// This mirrors the create path (PrepareIssueForInsert → ValidateWithCustom)
+	// and reads custom types from the same transaction, so it works reliably
+	// even in subprocess contexts where the CLI-level store may be unavailable.
+	if rawType, ok := updates["issue_type"]; ok {
+		if issueType, ok := rawType.(string); ok {
+			customTypes, err := ResolveCustomTypesInTx(ctx, tx)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get custom types for validation: %w", err)
+			}
+			if !types.IssueType(issueType).IsValidWithCustom(customTypes) {
+				return nil, fmt.Errorf("invalid issue type: %s", issueType)
+			}
+		}
 	}
 
 	// Build SET clauses.
@@ -157,6 +213,9 @@ func UpdateIssueInTx(ctx context.Context, tx *sql.Tx, id string, updates map[str
 	// Auto-manage closed_at (set on close, clear on reopen).
 	setClauses, args = ManageClosedAt(oldIssue, updates, setClauses, args)
 
+	// Auto-manage started_at (set on transition to in_progress). (GH#2796)
+	setClauses, args = ManageStartedAt(oldIssue, updates, setClauses, args)
+
 	args = append(args, id)
 
 	//nolint:gosec // G201: issueTable comes from WispTableRouting (hardcoded constants)
@@ -165,13 +224,41 @@ func UpdateIssueInTx(ctx context.Context, tx *sql.Tx, id string, updates map[str
 		return nil, fmt.Errorf("failed to update issue: %w", err)
 	}
 
-	// Record event.
-	oldData, _ := json.Marshal(oldIssue)
-	newData, _ := json.Marshal(updates)
-	eventType := DetermineEventType(oldIssue, updates)
+	if recordEvent {
+		oldData, _ := json.Marshal(oldIssue)
+		newData, _ := json.Marshal(updates)
+		eventType := DetermineEventType(oldIssue, updates)
 
-	if err := RecordFullEventInTable(ctx, tx, eventTable, id, eventType, actor, string(oldData), string(newData)); err != nil {
-		return nil, fmt.Errorf("failed to record event: %w", err)
+		if err := RecordFullEventInTable(ctx, tx, eventTable, id, eventType, actor, string(oldData), string(newData)); err != nil {
+			return nil, fmt.Errorf("failed to record event: %w", err)
+		}
+	}
+
+	if rawStatus, hasStatus := updates["status"]; hasStatus {
+		var newStatus string
+		switch v := rawStatus.(type) {
+		case string:
+			newStatus = v
+		case types.Status:
+			newStatus = string(v)
+		}
+		oldActive := oldIssue.Status != types.StatusClosed && oldIssue.Status != types.StatusPinned
+		newActive := newStatus != string(types.StatusClosed) && newStatus != string(types.StatusPinned)
+		if oldActive != newActive {
+			var affectedIssues, affectedWisps []string
+			var aerr error
+			if isWisp {
+				affectedIssues, affectedWisps, aerr = AffectedByStatusChangeForWispInTx(ctx, tx, id)
+			} else {
+				affectedIssues, affectedWisps, aerr = AffectedByStatusChangeInTx(ctx, tx, id)
+			}
+			if aerr != nil {
+				return nil, fmt.Errorf("affected by status change for %s: %w", id, aerr)
+			}
+			if err := RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
+				return nil, fmt.Errorf("recompute is_blocked after status change for %s: %w", id, err)
+			}
+		}
 	}
 
 	return &UpdateResult{OldIssue: oldIssue, IsWisp: isWisp}, nil

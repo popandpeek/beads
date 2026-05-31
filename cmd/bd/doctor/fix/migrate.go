@@ -30,12 +30,10 @@ func DatabaseVersion(path string) error {
 // DatabaseVersionWithBdVersion is like DatabaseVersion but accepts an explicit
 // bd version string for setting the bd_version metadata field.
 func DatabaseVersionWithBdVersion(path string, bdVersion string) error {
-	// Validate workspace
-	if err := validateBeadsWorkspace(path); err != nil {
+	beadsDir, err := resolvedWorkspaceBeadsDir(path)
+	if err != nil {
 		return err
 	}
-
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 
 	// Load or create config
 	cfg, err := configfile.Load(beadsDir)
@@ -69,7 +67,7 @@ func DatabaseVersionWithBdVersion(path string, bdVersion string) error {
 
 		// Set version metadata if provided
 		if bdVersion != "" {
-			if err := store.SetMetadata(ctx, "bd_version", bdVersion); err != nil {
+			if err := store.SetLocalMetadata(ctx, "bd_version", bdVersion); err != nil {
 				fmt.Printf("  Warning: failed to set bd_version: %v\n", err)
 			}
 		}
@@ -101,9 +99,9 @@ func DatabaseVersionWithBdVersion(path string, bdVersion string) error {
 	}
 	defer func() { _ = store.Close() }()
 
-	// Update bd_version if provided
+	// Update bd_version if provided (clone-local, dolt-ignored)
 	if bdVersion != "" {
-		if err := store.SetMetadata(ctx, "bd_version", bdVersion); err != nil {
+		if err := store.SetLocalMetadata(ctx, "bd_version", bdVersion); err != nil {
 			return fmt.Errorf("failed to set bd_version: %w", err)
 		}
 	}
@@ -137,11 +135,10 @@ func SchemaCompatibility(path string) error {
 // existing (possibly empty) Dolt store. This covers the case where the Database
 // fix already created the store but a prior version didn't import.
 func FreshCloneImport(path string, bdVersion string) error {
-	if err := validateBeadsWorkspace(path); err != nil {
+	beadsDir, err := resolvedWorkspaceBeadsDir(path)
+	if err != nil {
 		return err
 	}
-
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 
 	// Check for JSONL file
 	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")

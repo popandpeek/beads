@@ -19,11 +19,11 @@ func bdPromote(t *testing.T, bd, dir string, args ...string) string {
 	cmd := exec.Command(bd, fullArgs...)
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd promote %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		t.Fatalf("bd promote %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
-	return string(out)
+	return stdout.String()
 }
 
 // bdPromoteFail runs "bd promote" expecting failure.
@@ -95,11 +95,11 @@ func TestEmbeddedPromoteCLI(t *testing.T) {
 		cmd := exec.Command(bd, "promote", issue.ID, "--json")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
-		out, err := cmd.CombinedOutput()
+		stdout, stderr, err := runCommandBuffers(t, cmd)
 		if err != nil {
-			t.Fatalf("bd promote --json failed: %v\n%s", err, out)
+			t.Fatalf("bd promote --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 		}
-		s := strings.TrimSpace(string(out))
+		s := strings.TrimSpace(stdout.String())
 		start := strings.Index(s, "{")
 		if start < 0 {
 			t.Fatalf("no JSON object in output: %s", s)
@@ -174,6 +174,7 @@ func TestEmbeddedPromoteCLIConcurrent(t *testing.T) {
 
 	type workerResult struct {
 		worker int
+		out    string
 		err    error
 	}
 
@@ -190,8 +191,9 @@ func TestEmbeddedPromoteCLIConcurrent(t *testing.T) {
 			cmd.Dir = dir
 			cmd.Env = bdEnv(dir)
 			out, err := cmd.CombinedOutput()
+			r.out = string(out)
 			if err != nil {
-				r.err = fmt.Errorf("promote %s: %v\n%s", issueIDs[worker], err, out)
+				r.err = fmt.Errorf("promote %s: %v", issueIDs[worker], err)
 			}
 
 			results[worker] = r
@@ -199,17 +201,18 @@ func TestEmbeddedPromoteCLIConcurrent(t *testing.T) {
 	}
 	wg.Wait()
 
+	// The driver handles concurrency internally — all workers should succeed.
 	for _, r := range results {
 		if r.err != nil {
 			t.Errorf("worker %d failed: %v", r.worker, r.err)
 		}
 	}
 
-	// Verify all are now permanent
-	for _, id := range issueIDs {
+	// Verify all issues are permanent.
+	for i, id := range issueIDs {
 		got := bdShow(t, bd, dir, id)
 		if got.Ephemeral {
-			t.Errorf("expected %s to be permanent after promote", id)
+			t.Errorf("expected %s (worker %d) to be permanent after promote", id, i)
 		}
 	}
 }

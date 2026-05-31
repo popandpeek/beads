@@ -26,7 +26,9 @@ import (
 // credentialKeyFile is the filename for the random encryption key stored alongside the database.
 const credentialKeyFile = ".beads-credential-key" //nolint:gosec // G101: not a credential, just a filename
 
-// federationEnvMutex protects DOLT_REMOTE_USER/PASSWORD env vars from concurrent access.
+const awsResponseChecksumValidationEnv = "AWS_RESPONSE_CHECKSUM_VALIDATION"
+
+// federationEnvMutex protects process-wide env vars from concurrent access.
 // Environment variables are process-global, so we need to serialize federation operations.
 var federationEnvMutex sync.Mutex
 
@@ -102,6 +104,25 @@ func (s *DoltStore) initCredentialKey(ctx context.Context) error {
 
 	s.credentialKey = key
 	return nil
+}
+
+// ensureCredentialKey lazily initializes the credential key when federation
+// operations actually need password encryption or decryption.
+func (s *DoltStore) ensureCredentialKey(ctx context.Context) error {
+	s.mu.RLock()
+	if s.credentialKey != nil {
+		s.mu.RUnlock()
+		return nil
+	}
+	s.mu.RUnlock()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.credentialKey != nil {
+		return nil
+	}
+	return s.initCredentialKey(ctx)
 }
 
 // legacyEncryptionKey derives the old predictable key from dbPath.
@@ -216,7 +237,9 @@ func (s *DoltStore) encryptPassword(password string) ([]byte, error) {
 	if password == "" {
 		return nil, nil
 	}
+	s.mu.RLock()
 	key := s.credentialKey
+	s.mu.RUnlock()
 	if key == nil {
 		return nil, fmt.Errorf("credential encryption key not initialized")
 	}
@@ -228,7 +251,9 @@ func (s *DoltStore) decryptPassword(encrypted []byte) (string, error) {
 	if len(encrypted) == 0 {
 		return "", nil
 	}
+	s.mu.RLock()
 	key := s.credentialKey
+	s.mu.RUnlock()
 	if key == nil {
 		return "", fmt.Errorf("credential encryption key not initialized")
 	}
@@ -247,6 +272,9 @@ func (s *DoltStore) AddFederationPeer(ctx context.Context, peer *storage.Federat
 	var encryptedPwd []byte
 	var err error
 	if peer.Password != "" {
+		if err := s.ensureCredentialKey(ctx); err != nil {
+			return fmt.Errorf("failed to initialize credential key: %w", err)
+		}
 		encryptedPwd, err = s.encryptPassword(peer.Password)
 		if err != nil {
 			return fmt.Errorf("failed to encrypt password: %w", err)
@@ -309,6 +337,9 @@ func (s *DoltStore) GetFederationPeer(ctx context.Context, name string) (*storag
 
 	// Decrypt password
 	if len(encryptedPwd) > 0 {
+		if err := s.ensureCredentialKey(ctx); err != nil {
+			return nil, fmt.Errorf("failed to initialize credential key: %w", err)
+		}
 		peer.Password, err = s.decryptPassword(encryptedPwd)
 		if err != nil {
 			return nil, fmt.Errorf("failed to decrypt password: %w", err)
@@ -349,6 +380,9 @@ func (s *DoltStore) ListFederationPeers(ctx context.Context) ([]*storage.Federat
 
 		// Decrypt password
 		if len(encryptedPwd) > 0 {
+			if err := s.ensureCredentialKey(ctx); err != nil {
+				return nil, fmt.Errorf("failed to initialize credential key: %w", err)
+			}
 			peer.Password, err = s.decryptPassword(encryptedPwd)
 			if err != nil {
 				return nil, fmt.Errorf("failed to decrypt password: %w", err)
@@ -423,6 +457,46 @@ func (c *remoteCredentials) applyToCmd(cmd *exec.Cmd) {
 	cmd.Env = env
 }
 
+func setCmdEnv(cmd *exec.Cmd, key, value string) {
+	prefix := key + "="
+	base := cmd.Env
+	if base == nil {
+		base = os.Environ()
+	}
+	env := make([]string, 0, len(base)+1)
+	for _, e := range base {
+		if !strings.HasPrefix(e, prefix) {
+			env = append(env, e)
+		}
+	}
+	cmd.Env = append(env, prefix+value)
+}
+
+func applyS3ChecksumEnvToCmd(cmd *exec.Cmd) {
+	setCmdEnv(cmd, awsResponseChecksumValidationEnv, "when_required")
+}
+
+// applyNoGitHooksToCmd disables git client-side hooks (notably pre-push) for
+// any git invocation made by the subprocess. bd-internal git ops — in
+// particular the `git push --porcelain --force-with-lease=… refs/dolt/data`
+// that Dolt runs against its embedded `git-remote-cache/<hash>/repo.git/`
+// mirror during `dolt push` — must not run user-installed hooks.
+//
+// The cache-mirror is a bare-style repo with no work tree, but `git init`
+// still honors the user's `init.templateDir` and copies template hooks
+// into its `hooks/` dir. When the user's templated `pre-push` hook calls
+// `git diff` / `git status` (e.g. via the pre-commit framework's
+// staged_files_only setup) it fails with `fatal: this operation must be
+// run in a work tree` and bd's push fails with it.
+//
+// `GIT_CONFIG_PARAMETERS='core.hooksPath=/dev/null'` tells every git
+// invocation in the subprocess to look for hooks in `/dev/null` — i.e. to
+// skip them. Same intent as the `--no-verify` fix on the commit side
+// (GH#3340 / GH#3598 / PR #3626), applied at the push site (GH#3724).
+func applyNoGitHooksToCmd(cmd *exec.Cmd) {
+	setCmdEnv(cmd, "GIT_CONFIG_PARAMETERS", "'core.hooksPath=/dev/null'")
+}
+
 // setFederationCredentials sets DOLT_REMOTE_USER and DOLT_REMOTE_PASSWORD env vars.
 // Returns a cleanup function that must be called (typically via defer) to unset them.
 // The caller must hold federationEnvMutex.
@@ -441,20 +515,48 @@ func setFederationCredentials(username, password string) func() {
 	}
 }
 
+func setS3ChecksumEnv() func() {
+	prev, hadPrev := os.LookupEnv(awsResponseChecksumValidationEnv)
+	_ = os.Setenv(awsResponseChecksumValidationEnv, "when_required")
+	return func() {
+		if hadPrev {
+			_ = os.Setenv(awsResponseChecksumValidationEnv, prev)
+		} else {
+			_ = os.Unsetenv(awsResponseChecksumValidationEnv)
+		}
+	}
+}
+
+func withRemoteOperationEnv(creds *remoteCredentials, s3Checksum bool, fn func() error) error {
+	if creds.empty() && !s3Checksum {
+		return fn()
+	}
+	federationEnvMutex.Lock()
+	defer federationEnvMutex.Unlock()
+
+	var cleanups []func()
+	if !creds.empty() {
+		cleanups = append(cleanups, setFederationCredentials(creds.username, creds.password))
+	}
+	if s3Checksum {
+		cleanups = append(cleanups, setS3ChecksumEnv())
+	}
+	defer func() {
+		for i := len(cleanups) - 1; i >= 0; i-- {
+			cleanups[i]()
+		}
+	}()
+
+	return fn()
+}
+
 // withEnvCredentials executes fn with credentials set as process-wide env vars,
 // protected by federationEnvMutex. This is required for SQL-path operations
 // (CALL DOLT_PUSH/PULL) where the in-process Dolt server reads credentials
 // from the process environment. CLI operations should NOT use this — use
 // remoteCredentials.applyToCmd instead for race-free subprocess isolation.
 func withEnvCredentials(creds *remoteCredentials, fn func() error) error {
-	if creds.empty() {
-		return fn()
-	}
-	federationEnvMutex.Lock()
-	defer federationEnvMutex.Unlock()
-	cleanup := setFederationCredentials(creds.username, creds.password)
-	defer cleanup()
-	return fn()
+	return withRemoteOperationEnv(creds, false, fn)
 }
 
 // withPeerCredentials looks up credentials for a federation peer and passes
@@ -521,8 +623,8 @@ func (s *DoltStore) shouldUseCLIForPeerCredentials(_ context.Context, peer strin
 //  2. Server is in server mode (not embedded)
 //  3. Local CLI directory is available
 //  4. The remote is configured in the local CLI directory
-func (s *DoltStore) shouldUseCLIForCredentials(_ context.Context) bool {
-	if s.remoteUser == "" && s.remotePassword == "" {
+func (s *DoltStore) shouldUseCLIForCredentials(_ context.Context, remote string, creds *remoteCredentials) bool {
+	if creds.empty() {
 		return false // no credentials to pass
 	}
 	if !s.serverMode {
@@ -535,27 +637,105 @@ func (s *DoltStore) shouldUseCLIForCredentials(_ context.Context) bool {
 	// Only route to CLI if the remote is configured locally.
 	// Shared server / external server modes may have CLIDir pointing
 	// to wrong directory — FindCLIRemote returns "" in those cases.
-	return doltutil.FindCLIRemote(cliDir, s.remote) != ""
+	return doltutil.FindCLIRemote(cliDir, remote) != ""
 }
 
-// cloudAuthEnvPrefixes lists environment variable prefixes used by cloud
-// storage providers for authentication. When any of these are set and the
-// store is in server mode, push/pull must route through a CLI subprocess
-// so the dolt process inherits the current env vars. The SQL path
-// (CALL DOLT_PUSH/PULL) executes inside the dolt-sql-server, which only
-// has env vars from when it was started — not from the current shell.
-var cloudAuthEnvPrefixes = []string{
-	"AZURE_STORAGE_", // Azure Blob Storage (AZURE_STORAGE_ACCOUNT, AZURE_STORAGE_KEY, AZURE_STORAGE_SAS_TOKEN)
-	"AWS_",           // AWS S3 (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN, AWS_REGION)
-	"GOOGLE_",        // GCS (GOOGLE_APPLICATION_CREDENTIALS)
-	"GCS_",           // GCS alternate (GCS_CREDENTIALS_FILE)
-	"OCI_",           // Oracle Cloud Infrastructure
-	"DOLT_REMOTE_",   // Dolt-specific remote credentials
+func shouldUseCLIForMatchingLocalRemote(sqlRemotes []storage.RemoteInfo, cliURL, remote string) bool {
+	if cliURL == "" {
+		return false
+	}
+	for _, r := range sqlRemotes {
+		if r.Name == remote && r.URL == cliURL {
+			return true
+		}
+	}
+	return false
+}
+
+// shouldUseCLIForLocalRemote returns true when the SQL-visible remote also
+// exists in the local CLI directory with the same URL. In that case the CLI
+// and SQL paths target the same remote, and CLI push is closer to direct
+// `dolt push` behavior than CALL DOLT_PUSH through the sql-server.
+func (s *DoltStore) shouldUseCLIForLocalRemote(ctx context.Context, remote string) bool {
+	if !s.serverMode {
+		return false
+	}
+	cliDir := s.CLIDir()
+	if cliDir == "" {
+		return false
+	}
+	cliURL := doltutil.FindCLIRemote(cliDir, remote)
+	if cliURL == "" {
+		return false
+	}
+	sqlRemotes, err := s.ListRemotes(ctx)
+	if err != nil {
+		return false
+	}
+	return shouldUseCLIForMatchingLocalRemote(sqlRemotes, cliURL, remote)
+}
+
+// cloudAuthSchemeMap maps remote URL scheme prefixes to the environment
+// variable prefixes that provide credentials for that scheme. Only env vars
+// relevant to the remote's scheme are checked, preventing misrouting when
+// multiple remotes use different cloud providers (e.g., DoltHub + Azure).
+//
+// The CLI subprocess inherits the current process env, so these env vars
+// reach the dolt binary. The SQL server process may not have them if it was
+// started in a different context (GH#6).
+var cloudAuthSchemeMap = map[string][]string{
+	"az://":      {"AZURE_STORAGE_"},  // Azure Blob Storage
+	"aws://":     {"AWS_"},            // Dolt AWS remotes (S3 + DynamoDB)
+	"s3://":      {"AWS_"},            // AWS S3
+	"gs://":      {"GOOGLE_", "GCS_"}, // Google Cloud Storage
+	"oci://":     {"OCI_"},            // Oracle Cloud Infrastructure
+	"dolthub://": {"DOLT_REMOTE_"},    // DoltHub
+	"https://":   {"DOLT_REMOTE_"},    // Hosted Dolt / DoltHub HTTPS
+	"http://":    {"DOLT_REMOTE_"},    // Hosted Dolt HTTP
+}
+
+func isS3RemoteURL(url string) bool {
+	return strings.HasPrefix(url, "aws://") || strings.HasPrefix(url, "s3://")
+}
+
+func (s *DoltStore) isS3Remote(ctx context.Context, remote string) bool {
+	remotes, err := s.ListRemotes(ctx)
+	if err == nil {
+		for _, r := range remotes {
+			if r.Name == remote {
+				return isS3RemoteURL(r.URL)
+			}
+		}
+	}
+	if cliDir := s.CLIDir(); cliDir != "" {
+		return isS3RemoteURL(doltutil.FindCLIRemote(cliDir, remote))
+	}
+	return false
+}
+
+// envPrefixesForRemoteURL returns the env var prefixes relevant to the
+// given remote URL based on its scheme. Returns nil for unrecognized schemes
+// (git-protocol remotes are handled by isGitProtocolRemote, not here).
+func envPrefixesForRemoteURL(url string) []string {
+	for scheme, prefixes := range cloudAuthSchemeMap {
+		if strings.HasPrefix(url, scheme) {
+			return prefixes
+		}
+	}
+	return nil
 }
 
 // shouldUseCLIForCloudAuth returns true when CLI subprocess routing should
-// be used for push/pull because cloud storage credentials are present in the
-// environment and the store is using an external dolt-sql-server.
+// be used for push/pull because cloud storage credentials relevant to this
+// specific remote are present in the environment and the store is using an
+// external dolt-sql-server.
+//
+// Unlike a global heuristic, this checks only the env var prefixes that
+// match the remote's URL scheme. An Azure env var (AZURE_STORAGE_ACCOUNT)
+// will trigger CLI routing for an az:// remote but NOT for a dolthub:// remote.
+//
+// The CLI remote URL is used for scheme detection because that is the URL
+// the CLI subprocess will actually use (SQL remotes may differ due to drift).
 //
 // When bd connects to an external dolt-sql-server (server mode), CALL
 // DOLT_PUSH/PULL executes inside the server process. That process only has
@@ -563,7 +743,7 @@ var cloudAuthEnvPrefixes = []string{
 // changed) after the server started, the SQL path silently fails to
 // authenticate. Routing through a CLI subprocess (dolt push/pull) ensures
 // the child process inherits the current environment (GH#6).
-func (s *DoltStore) shouldUseCLIForCloudAuth() bool {
+func (s *DoltStore) shouldUseCLIForCloudAuth(remote string) bool {
 	if !s.serverMode {
 		return false // embedded mode: env vars are in-process
 	}
@@ -571,11 +751,16 @@ func (s *DoltStore) shouldUseCLIForCloudAuth() bool {
 	if cliDir == "" {
 		return false
 	}
-	if doltutil.FindCLIRemote(cliDir, s.remote) == "" {
+	cliURL := doltutil.FindCLIRemote(cliDir, remote)
+	if cliURL == "" {
 		return false
 	}
+	prefixes := envPrefixesForRemoteURL(cliURL)
+	if len(prefixes) == 0 {
+		return false // unknown scheme — not a cloud remote
+	}
 	for _, e := range os.Environ() {
-		for _, prefix := range cloudAuthEnvPrefixes {
+		for _, prefix := range prefixes {
 			if strings.HasPrefix(e, prefix) {
 				return true
 			}

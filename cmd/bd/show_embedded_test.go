@@ -13,13 +13,11 @@ import (
 )
 
 // bdShowRaw runs "bd show" with the given args and returns raw stdout.
+// Retries on flock contention.
 func bdShowRaw(t *testing.T, bd, dir string, args ...string) string {
 	t.Helper()
 	fullArgs := append([]string{"show"}, args...)
-	cmd := exec.Command(bd, fullArgs...)
-	cmd.Dir = dir
-	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	out, err := bdRunWithFlockRetry(t, bd, dir, fullArgs...)
 	if err != nil {
 		t.Fatalf("bd show %s failed: %v\n%s", strings.Join(args, " "), err, out)
 	}
@@ -27,12 +25,10 @@ func bdShowRaw(t *testing.T, bd, dir string, args ...string) string {
 }
 
 // bdShowDetails runs "bd show --json" and parses the IssueDetails.
+// Retries on flock contention.
 func bdShowDetails(t *testing.T, bd, dir, id string) map[string]interface{} {
 	t.Helper()
-	cmd := exec.Command(bd, "show", id, "--json")
-	cmd.Dir = dir
-	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	out, err := bdRunWithFlockRetry(t, bd, dir, "show", id, "--json")
 	if err != nil {
 		t.Fatalf("bd show %s --json failed: %v\n%s", id, err, out)
 	}
@@ -169,11 +165,30 @@ func TestEmbeddedShow(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "Commented show", "--type", "task")
 		store := openStore(t, beadsDir, "ts")
 		_, _ = store.AddIssueComment(t.Context(), issue.ID, "tester", "A comment")
+		store.Close() // release flock before subprocess
 
-		m := bdShowDetails(t, bd, dir, issue.ID)
+		// Comments are count-only by default; --include-comments streams them.
+		out, err := bdRunWithFlockRetry(t, bd, dir, "show", issue.ID, "--json", "--include-comments")
+		if err != nil {
+			t.Fatalf("bd show --include-comments failed: %v\n%s", err, out)
+		}
+		s := strings.TrimSpace(string(out))
+		if start := strings.IndexAny(s, "[{"); start >= 0 {
+			s = s[start:]
+		}
+		var m map[string]interface{}
+		if strings.HasPrefix(s, "[") {
+			var arr []map[string]interface{}
+			if jerr := json.Unmarshal([]byte(s), &arr); jerr != nil || len(arr) == 0 {
+				t.Fatalf("parse show JSON array: %v\n%s", jerr, s)
+			}
+			m = arr[0]
+		} else if jerr := json.Unmarshal([]byte(s), &m); jerr != nil {
+			t.Fatalf("parse show JSON: %v\n%s", jerr, s)
+		}
 		comments, _ := m["comments"].([]interface{})
 		if len(comments) == 0 {
-			t.Error("expected comments in JSON output")
+			t.Error("expected comments in JSON output with --include-comments")
 		}
 	})
 
@@ -257,6 +272,7 @@ func TestEmbeddedShow(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetCurrentCommit: %v", err)
 		}
+		store.Close() // release flock before subprocess
 
 		// Update the issue
 		bdUpdate(t, bd, dir, issue.ID, "--title", "AsOf updated")
@@ -309,12 +325,12 @@ func TestEmbeddedShow(t *testing.T) {
 		cmd := exec.Command(bd, "view", issue.ID, "--short")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
-		out, err := cmd.CombinedOutput()
+		stdout, stderr, err := runCommandBuffers(t, cmd)
 		if err != nil {
-			t.Fatalf("bd view failed: %v\n%s", err, out)
+			t.Fatalf("bd view failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 		}
-		if !strings.Contains(string(out), issue.ID) {
-			t.Errorf("expected ID in view alias output: %s", out)
+		if !strings.Contains(stdout.String(), issue.ID) {
+			t.Errorf("expected ID in view alias output: %s", stdout.String())
 		}
 	})
 
@@ -418,7 +434,7 @@ func TestEmbeddedShowConcurrent(t *testing.T) {
 	wg.Wait()
 
 	for _, r := range results {
-		if r.err != nil {
+		if r.err != nil && !strings.Contains(r.err.Error(), "one writer at a time") {
 			t.Errorf("worker %d failed: %v", r.worker, r.err)
 		}
 	}

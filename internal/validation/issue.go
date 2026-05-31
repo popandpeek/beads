@@ -2,6 +2,7 @@ package validation
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -114,6 +115,27 @@ func HasType(allowed ...types.IssueType) IssueValidator {
 			}
 		}
 		return fmt.Errorf("issue %s has type %s, expected one of: %v", id, issue.IssueType, allowed)
+	}
+}
+
+// NotPolecatReviewClose prevents polecats from closing beads that are in review.
+// When a bead has an assignee containing "/polecats/" and its status indicates
+// review (in_review or reviewing), close is rejected. This prevents polecats
+// from closing beads after gt done sets them to in_review — only Refinery
+// should close after merge.
+func NotPolecatReviewClose(force bool) IssueValidator {
+	return func(id string, issue *types.Issue) error {
+		if issue == nil || force {
+			return nil
+		}
+		if !strings.Contains(issue.Assignee, "/polecats/") {
+			return nil
+		}
+		s := string(issue.Status)
+		if s == "in_review" || s == "reviewing" {
+			return fmt.Errorf("cannot close %s: bead is %s and assigned to a polecat — Refinery closes after merge (use --force to override)", id, s)
+		}
+		return nil
 	}
 }
 

@@ -1,6 +1,7 @@
 package types
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -513,11 +514,12 @@ func TestIssueTypeIsValid(t *testing.T) {
 		{TypeChore, true},
 		{TypeDecision, true},
 		{TypeMessage, true},
-		// Molecule is now a core type (used by swarm create)
+		// Molecule is a core type (used by swarm create)
 		{IssueType("molecule"), true},
-		// Orchestrator types are now custom types (not built-in)
+		// Gate is a core type (used by bd gate, formula gates — GH#3213)
+		{IssueType("gate"), true},
+		// Remaining orchestrator types are custom types (not built-in)
 		{IssueType("merge-request"), false},
-		{IssueType("gate"), false},
 		{IssueType("agent"), false},
 		{IssueType("role"), false},
 		{IssueType("convoy"), false},
@@ -581,9 +583,9 @@ func TestEventTypeValidation(t *testing.T) {
 	if !IssueType("molecule").IsBuiltIn() {
 		t.Error("IssueType(molecule).IsBuiltIn() = false, want true")
 	}
-	// custom types must NOT be treated as built-in
-	if IssueType("gate").IsBuiltIn() {
-		t.Error("IssueType(gate).IsBuiltIn() = true, want false")
+	// gate is now a built-in type (used by bd gate, formula gates — GH#3213)
+	if !IssueType("gate").IsBuiltIn() {
+		t.Error("IssueType(gate).IsBuiltIn() = false, want true")
 	}
 
 	// Normalize must not map event to a core type
@@ -1473,6 +1475,139 @@ func TestParseCustomStatusConfigEdgeCases(t *testing.T) {
 					t.Errorf("status[%d] = {%q, %q}, want {%q, %q}",
 						i, g.Name, g.Category, tt.want[i].Name, tt.want[i].Category)
 				}
+			}
+		})
+	}
+}
+
+func TestCommentUnmarshalJSON(t *testing.T) {
+	tests := []struct {
+		name       string
+		input      string
+		wantID     string
+		wantAuthor string
+		wantText   string
+		wantErr    bool
+	}{
+		{
+			name:       "string ID (v1.0+)",
+			input:      `{"id":"uuid-abc","author":"alice","text":"hello","created_at":"2025-01-01T00:00:00Z"}`,
+			wantID:     "uuid-abc",
+			wantAuthor: "alice",
+			wantText:   "hello",
+		},
+		{
+			name:       "numeric ID (pre-v1.0)",
+			input:      `{"id":42,"author":"bob","text":"old comment","created_at":"2025-01-01T00:00:00Z"}`,
+			wantID:     "42",
+			wantAuthor: "bob",
+			wantText:   "old comment",
+		},
+		{
+			name:   "zero numeric ID",
+			input:  `{"id":0,"author":"sys","text":"auto","created_at":"2025-01-01T00:00:00Z"}`,
+			wantID: "0",
+		},
+		{
+			name:   "large numeric ID",
+			input:  `{"id":9999999,"author":"alice","text":"big","created_at":"2025-01-01T00:00:00Z"}`,
+			wantID: "9999999",
+		},
+		{
+			name:   "missing ID field",
+			input:  `{"author":"alice","text":"no id","created_at":"2025-01-01T00:00:00Z"}`,
+			wantID: "",
+		},
+		{
+			name:    "invalid JSON",
+			input:   `{not valid`,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var c Comment
+			err := json.Unmarshal([]byte(tt.input), &c)
+			if tt.wantErr {
+				if err == nil {
+					t.Error("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if c.ID != tt.wantID {
+				t.Errorf("ID = %q, want %q", c.ID, tt.wantID)
+			}
+			if tt.wantAuthor != "" && c.Author != tt.wantAuthor {
+				t.Errorf("Author = %q, want %q", c.Author, tt.wantAuthor)
+			}
+			if tt.wantText != "" && c.Text != tt.wantText {
+				t.Errorf("Text = %q, want %q", c.Text, tt.wantText)
+			}
+		})
+	}
+}
+
+func TestBondRefUnmarshalJSON(t *testing.T) {
+	tests := []struct {
+		name         string
+		input        string
+		wantSourceID string
+		wantBondType string
+		wantErr      bool
+	}{
+		{
+			name:         "current format with source_id",
+			input:        `{"source_id":"bd-src1","bond_type":"sequential"}`,
+			wantSourceID: "bd-src1",
+			wantBondType: "sequential",
+		},
+		{
+			name:         "legacy format with proto_id",
+			input:        `{"proto_id":"bd-old1","bond_type":"parallel"}`,
+			wantSourceID: "bd-old1",
+			wantBondType: "parallel",
+		},
+		{
+			name:         "both fields — source_id takes precedence",
+			input:        `{"source_id":"bd-new","proto_id":"bd-old","bond_type":"conditional"}`,
+			wantSourceID: "bd-new",
+			wantBondType: "conditional",
+		},
+		{
+			name:         "neither field present",
+			input:        `{"bond_type":"sequential"}`,
+			wantSourceID: "",
+			wantBondType: "sequential",
+		},
+		{
+			name:    "invalid JSON",
+			input:   `{not valid`,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var b BondRef
+			err := json.Unmarshal([]byte(tt.input), &b)
+			if tt.wantErr {
+				if err == nil {
+					t.Error("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if b.SourceID != tt.wantSourceID {
+				t.Errorf("SourceID = %q, want %q", b.SourceID, tt.wantSourceID)
+			}
+			if b.BondType != tt.wantBondType {
+				t.Errorf("BondType = %q, want %q", b.BondType, tt.wantBondType)
 			}
 		})
 	}

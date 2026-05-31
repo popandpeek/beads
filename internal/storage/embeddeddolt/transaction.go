@@ -20,9 +20,8 @@ import (
 func (s *EmbeddedDoltStore) RunInTransaction(ctx context.Context, commitMsg string, fn func(tx storage.Transaction) error) error {
 	var tracker versioncontrolops.DirtyTableTracker
 
-	if err := s.withConn(ctx, true, func(sqlTx *sql.Tx) error {
-		tx := &embeddedTransaction{tx: sqlTx, dirty: &tracker}
-		return fn(tx)
+	if err := s.withConn(ctx, true, func(tx *sql.Tx) error {
+		return fn(&embeddedTransaction{tx: tx, dirty: &tracker})
 	}); err != nil {
 		return err
 	}
@@ -36,7 +35,6 @@ func (s *EmbeddedDoltStore) RunInTransaction(ctx context.Context, commitMsg stri
 	return nil
 }
 
-// embeddedTransaction implements storage.Transaction for EmbeddedDoltStore.
 type embeddedTransaction struct {
 	tx    *sql.Tx
 	dirty *versioncontrolops.DirtyTableTracker
@@ -47,16 +45,26 @@ func (t *embeddedTransaction) CreateIssue(ctx context.Context, issue *types.Issu
 	if err != nil {
 		return err
 	}
-	t.dirty.MarkDirty("issues")
-	t.dirty.MarkDirty("events")
-	return issueops.CreateIssueInTx(ctx, t.tx, bc, issue, actor)
+	result, err := issueops.CreateIssueInTxWithResult(ctx, t.tx, bc, issue, actor)
+	if err != nil {
+		return err
+	}
+	for table := range issueops.CreateIssueDirtyTables(ctx, issue, result) {
+		t.dirty.MarkDirty(table)
+	}
+	return nil
 }
 
 func (t *embeddedTransaction) CreateIssues(ctx context.Context, issues []*types.Issue, actor string) error {
-	for _, issue := range issues {
-		if err := t.CreateIssue(ctx, issue, actor); err != nil {
-			return err
-		}
+	result, err := issueops.CreateIssuesInTxWithResult(ctx, t.tx, issues, actor, storage.BatchCreateOptions{
+		OrphanHandling:       storage.OrphanAllow,
+		SkipPrefixValidation: true,
+	})
+	if err != nil {
+		return err
+	}
+	for table := range issueops.CreateIssuesDirtyTables(ctx, issues, result) {
+		t.dirty.MarkDirty(table)
 	}
 	return nil
 }
@@ -93,8 +101,19 @@ func (t *embeddedTransaction) SearchIssues(ctx context.Context, query string, fi
 }
 
 func (t *embeddedTransaction) AddDependency(ctx context.Context, dep *types.Dependency, actor string) error {
-	t.dirty.MarkDirty("dependencies")
-	return issueops.AddDependencyInTx(ctx, t.tx, dep, actor, issueops.AddDependencyOpts{})
+	return t.AddDependencyWithOptions(ctx, dep, actor, storage.DependencyAddOptions{})
+}
+
+func (t *embeddedTransaction) AddDependencyWithOptions(ctx context.Context, dep *types.Dependency, actor string, addOpts storage.DependencyAddOptions) error {
+	_, _, _, depTable := issueops.WispTableRouting(issueops.IsActiveWispInTx(ctx, t.tx, dep.IssueID))
+	if err := issueops.AddDependencyInTx(ctx, t.tx, dep, actor, issueops.AddDependencyOpts{
+		IsCrossPrefix:  types.ExtractPrefix(dep.IssueID) != types.ExtractPrefix(dep.DependsOnID),
+		SkipCycleCheck: addOpts.SkipCycleCheck,
+	}); err != nil {
+		return err
+	}
+	t.dirty.MarkDirty(depTable)
+	return nil
 }
 
 func (t *embeddedTransaction) RemoveDependency(ctx context.Context, issueID, dependsOnID string, actor string) error {
@@ -126,7 +145,23 @@ func (t *embeddedTransaction) GetLabels(ctx context.Context, issueID string) ([]
 
 func (t *embeddedTransaction) SetConfig(ctx context.Context, key, value string) error {
 	t.dirty.MarkDirty("config")
-	return issueops.SetConfigInTx(ctx, t.tx, key, value)
+	if err := issueops.SetConfigInTx(ctx, t.tx, key, value); err != nil {
+		return err
+	}
+	// Sync normalized tables when config keys change
+	switch key {
+	case "status.custom":
+		t.dirty.MarkDirty("custom_statuses")
+		if err := issueops.SyncCustomStatusesTable(ctx, t.tx, value); err != nil {
+			return fmt.Errorf("syncing custom_statuses table: %w", err)
+		}
+	case "types.custom":
+		t.dirty.MarkDirty("custom_types")
+		if err := issueops.SyncCustomTypesTable(ctx, t.tx, value); err != nil {
+			return fmt.Errorf("syncing custom_types table: %w", err)
+		}
+	}
+	return nil
 }
 
 func (t *embeddedTransaction) GetConfig(ctx context.Context, key string) (string, error) {
@@ -140,6 +175,14 @@ func (t *embeddedTransaction) SetMetadata(ctx context.Context, key, value string
 
 func (t *embeddedTransaction) GetMetadata(ctx context.Context, key string) (string, error) {
 	return issueops.GetMetadataInTx(ctx, t.tx, key)
+}
+
+func (t *embeddedTransaction) SetLocalMetadata(ctx context.Context, key, value string) error {
+	return issueops.SetLocalMetadataInTx(ctx, t.tx, key, value)
+}
+
+func (t *embeddedTransaction) GetLocalMetadata(ctx context.Context, key string) (string, error) {
+	return issueops.GetLocalMetadataInTx(ctx, t.tx, key)
 }
 
 func (t *embeddedTransaction) AddComment(ctx context.Context, issueID, actor, comment string) error {
@@ -159,7 +202,12 @@ func (t *embeddedTransaction) CreateIssueImport(ctx context.Context, issue *type
 	if err != nil {
 		return err
 	}
-	t.dirty.MarkDirty("issues")
-	t.dirty.MarkDirty("events")
-	return issueops.CreateIssueInTx(ctx, t.tx, bc, issue, actor)
+	result, err := issueops.CreateIssueInTxWithResult(ctx, t.tx, bc, issue, actor)
+	if err != nil {
+		return err
+	}
+	for table := range issueops.CreateIssueDirtyTables(ctx, issue, result) {
+		t.dirty.MarkDirty(table)
+	}
+	return nil
 }

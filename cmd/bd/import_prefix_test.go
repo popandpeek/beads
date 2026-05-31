@@ -12,9 +12,6 @@ import (
 )
 
 func TestCLI_Import_PrefixValidation_E2E(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow CLI test in short mode")
-	}
 	if testDoltServerPort == 0 {
 		t.Skip("skipping: Dolt test container not available")
 	}
@@ -27,7 +24,7 @@ func TestCLI_Import_PrefixValidation_E2E(t *testing.T) {
 	}
 	bdBinary := filepath.Join(tmpDir, bdName)
 
-	buildCmd := exec.Command("go", "build", "-o", bdBinary, ".")
+	buildCmd := exec.Command("go", "build", "-tags", "gms_pure_go", "-o", bdBinary, ".")
 	if out, err := buildCmd.CombinedOutput(); err != nil {
 		t.Fatalf("Failed to build bd: %v\nOutput: %s", err, out)
 	}

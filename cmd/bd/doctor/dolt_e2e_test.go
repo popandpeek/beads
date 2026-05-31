@@ -119,6 +119,9 @@ func initDoctorSharedSchema(port int) error {
 	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('--allow-empty', '-m', 'test: init shared schema')"); err != nil {
 		return fmt.Errorf("DOLT_COMMIT: %w", err)
 	}
+	if err := testutil.MaterializeLocalTableSchemasForBranchTests(ctx, db); err != nil {
+		return fmt.Errorf("materialize local table schemas: %w", err)
+	}
 
 	return nil
 }
@@ -145,7 +148,7 @@ func buildTestBD(t *testing.T) string {
 
 		// Build from cmd/bd relative to the module root.
 		// The test runs from cmd/bd/doctor/, so module root is ../../../
-		cmd := exec.Command("go", "build", "-o", testBDPath, "./cmd/bd")
+		cmd := exec.Command("go", "build", "-tags", "gms_pure_go", "-o", testBDPath, "./cmd/bd")
 
 		// Find the module root by looking for go.mod
 		modRoot := findModuleRoot(t)

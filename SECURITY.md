@@ -73,7 +73,7 @@ When syncing with external trackers (GitHub Issues, Jira, Linear, GitLab, Azure 
 
 **Sync security model:**
 - Sync is always **user-initiated** — no background daemons, no inbound webhooks, no listening ports
-- No data is sent to external trackers unless the user explicitly runs `bd push` or `bd sync`
+- No data is sent to external trackers unless the user explicitly runs a sync command such as `bd dolt push`
 - Conflict resolution strategies are deterministic and auditable via Dolt history
 
 **Content safety for AI agents:**
@@ -115,7 +115,7 @@ Once version 1.0 is released, we will support the latest major version and one p
 2. **Review before sharing** - Check issue content before sharing project details
 3. **Use private repos** - If your issues contain proprietary information, use private git repositories
 4. **Validate git hooks** - If using automated export/import hooks, review them for safety
-5. **Regular updates** - Keep bd updated to the latest version: `go install github.com/steveyegge/beads/cmd/bd@latest`
+5. **Regular updates** - Keep bd updated with your package manager, or re-run the install script from [docs/INSTALLING.md](docs/INSTALLING.md).
 
 ## Known Limitations
 

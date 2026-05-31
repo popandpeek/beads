@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"net"
-	"os"
 	"strings"
 	"time"
 
@@ -14,6 +13,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
 // ServerHealthResult holds the results of all server health checks
@@ -291,18 +291,21 @@ func checkDoltVersion(cfg *configfile.Config, beadsDir string) (DoctorCheck, *sq
 	port := doltserver.DefaultConfig(beadsDir).Port
 	user := cfg.GetDoltServerUser()
 
-	// Get password from environment (more secure than config file)
-	password := os.Getenv("BEADS_DOLT_PASSWORD")
+	// Resolve password the same way the CRUD path does: BEADS_DOLT_PASSWORD env
+	// takes precedence (checked inside GetDoltServerPasswordForPort), with a
+	// fallback to ~/.config/beads/credentials keyed by [host:port]. Using the
+	// resolved runtime port is required because the port file may differ from
+	// the metadata port (bd-h5k7).
+	password := cfg.GetDoltServerPasswordForPort(port)
 
 	// Build DSN without database (just to test server connectivity)
-	var connStr string
-	if password != "" {
-		connStr = fmt.Sprintf("%s:%s@tcp(%s:%d)/?parseTime=true&timeout=5s",
-			user, password, host, port)
-	} else {
-		connStr = fmt.Sprintf("%s@tcp(%s:%d)/?parseTime=true&timeout=5s",
-			user, host, port)
-	}
+	connStr := doltutil.ServerDSN{
+		Host:     host,
+		Port:     port,
+		User:     user,
+		Password: password,
+		TLS:      cfg.GetDoltServerTLS(),
+	}.String()
 
 	db, err := sql.Open("mysql", connStr)
 	if err != nil {
@@ -519,7 +522,7 @@ func checkSchemaCompatible(db *sql.DB, database string) DoctorCheck {
 
 	// Query metadata table for bd_version
 	var bdVersion string
-	err = db.QueryRowContext(ctx, "SELECT value FROM metadata WHERE `key` = 'bd_version'").Scan(&bdVersion)
+	err = db.QueryRowContext(ctx, "SELECT value FROM local_metadata WHERE `key` = 'bd_version'").Scan(&bdVersion)
 	if err != nil && err != sql.ErrNoRows {
 		if strings.Contains(err.Error(), "doesn't exist") || strings.Contains(err.Error(), "Unknown table") {
 			return DoctorCheck{

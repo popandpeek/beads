@@ -15,10 +15,7 @@ import (
 func bdQuick(t *testing.T, bd, dir string, args ...string) string {
 	t.Helper()
 	fullArgs := append([]string{"q"}, args...)
-	cmd := exec.Command(bd, fullArgs...)
-	cmd.Dir = dir
-	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	out, err := bdRunWithFlockRetry(t, bd, dir, fullArgs...)
 	if err != nil {
 		t.Fatalf("bd q %s failed: %v\n%s", strings.Join(args, " "), err, out)
 	}
@@ -166,10 +163,7 @@ func TestEmbeddedQuickConcurrent(t *testing.T) {
 
 			for i := 0; i < issuesPerWorker; i++ {
 				title := fmt.Sprintf("w%d-quick-%d", worker, i)
-				cmd := exec.Command(bd, "q", title)
-				cmd.Dir = dir
-				cmd.Env = bdEnv(dir)
-				out, err := cmd.CombinedOutput()
+				out, err := bdRunWithFlockRetry(t, bd, dir, "q", title)
 				if err != nil {
 					r.err = fmt.Errorf("q %s: %v\n%s", title, err, out)
 					results[worker] = r
@@ -190,11 +184,15 @@ func TestEmbeddedQuickConcurrent(t *testing.T) {
 	wg.Wait()
 
 	allIDs := map[string]bool{}
+	var successes int
 	for _, r := range results {
 		if r.err != nil {
-			t.Errorf("worker %d failed: %v", r.worker, r.err)
+			if !strings.Contains(r.err.Error(), "one writer at a time") {
+				t.Errorf("worker %d failed: %v", r.worker, r.err)
+			}
 			continue
 		}
+		successes++
 		for _, id := range r.ids {
 			if allIDs[id] {
 				t.Errorf("duplicate ID %q from worker %d", id, r.worker)
@@ -203,8 +201,11 @@ func TestEmbeddedQuickConcurrent(t *testing.T) {
 		}
 	}
 
-	expected := numWorkers * issuesPerWorker
-	if len(allIDs) != expected {
-		t.Errorf("expected %d unique IDs, got %d", expected, len(allIDs))
+	if successes == 0 {
+		t.Fatal("all workers failed — expected at least 1 success")
+	}
+	expectedIDs := successes * issuesPerWorker
+	if len(allIDs) != expectedIDs {
+		t.Errorf("expected %d unique IDs from %d successful workers, got %d", expectedIDs, successes, len(allIDs))
 	}
 }

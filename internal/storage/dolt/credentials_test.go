@@ -2,10 +2,16 @@ package dolt
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/testutil"
 )
 
 func TestEncryptDecryptWithKey(t *testing.T) {
@@ -31,6 +37,135 @@ func TestEncryptDecryptWithKey(t *testing.T) {
 	}
 	if decrypted != password {
 		t.Errorf("decrypted = %q, want %q", decrypted, password)
+	}
+}
+
+func TestApplyS3ChecksumEnvToCmd(t *testing.T) {
+	t.Setenv(awsResponseChecksumValidationEnv, "when_supported")
+
+	cmd := exec.Command("dolt", "push") // #nosec G204 -- test command is not executed
+	(&remoteCredentials{username: "user", password: "pass"}).applyToCmd(cmd)
+	applyS3ChecksumEnvToCmd(cmd)
+
+	var gotChecksum, gotUser, gotPassword string
+	for _, e := range cmd.Env {
+		switch {
+		case strings.HasPrefix(e, awsResponseChecksumValidationEnv+"="):
+			gotChecksum = strings.TrimPrefix(e, awsResponseChecksumValidationEnv+"=")
+		case strings.HasPrefix(e, "DOLT_REMOTE_USER="):
+			gotUser = strings.TrimPrefix(e, "DOLT_REMOTE_USER=")
+		case strings.HasPrefix(e, "DOLT_REMOTE_PASSWORD="):
+			gotPassword = strings.TrimPrefix(e, "DOLT_REMOTE_PASSWORD=")
+		}
+	}
+
+	if gotChecksum != "when_required" {
+		t.Fatalf("%s = %q, want when_required", awsResponseChecksumValidationEnv, gotChecksum)
+	}
+	if gotUser != "user" || gotPassword != "pass" {
+		t.Fatalf("credential env = user:%q password:%q", gotUser, gotPassword)
+	}
+}
+
+func TestApplyNoGitHooksToCmd(t *testing.T) {
+	cmd := exec.Command("dolt", "push") // #nosec G204 -- test command is not executed
+	applyNoGitHooksToCmd(cmd)
+
+	var got string
+	for _, e := range cmd.Env {
+		if strings.HasPrefix(e, "GIT_CONFIG_PARAMETERS=") {
+			got = strings.TrimPrefix(e, "GIT_CONFIG_PARAMETERS=")
+			break
+		}
+	}
+	if want := "'core.hooksPath=/dev/null'"; got != want {
+		t.Fatalf("GIT_CONFIG_PARAMETERS = %q, want %q", got, want)
+	}
+}
+
+// TestApplyNoGitHooksToCmdComposesWithCredentials verifies the helper layers
+// cleanly on top of credential env vars, so callers that already populated
+// cmd.Env via remoteCredentials.applyToCmd keep their values.
+func TestApplyNoGitHooksToCmdComposesWithCredentials(t *testing.T) {
+	cmd := exec.Command("dolt", "push") // #nosec G204 -- test command is not executed
+	(&remoteCredentials{username: "user", password: "pass"}).applyToCmd(cmd)
+	applyNoGitHooksToCmd(cmd)
+
+	var gotHooks, gotUser, gotPassword string
+	for _, e := range cmd.Env {
+		switch {
+		case strings.HasPrefix(e, "GIT_CONFIG_PARAMETERS="):
+			gotHooks = strings.TrimPrefix(e, "GIT_CONFIG_PARAMETERS=")
+		case strings.HasPrefix(e, "DOLT_REMOTE_USER="):
+			gotUser = strings.TrimPrefix(e, "DOLT_REMOTE_USER=")
+		case strings.HasPrefix(e, "DOLT_REMOTE_PASSWORD="):
+			gotPassword = strings.TrimPrefix(e, "DOLT_REMOTE_PASSWORD=")
+		}
+	}
+	if gotHooks != "'core.hooksPath=/dev/null'" {
+		t.Fatalf("GIT_CONFIG_PARAMETERS = %q, want hook-disabling override", gotHooks)
+	}
+	if gotUser != "user" || gotPassword != "pass" {
+		t.Fatalf("credential env = user:%q password:%q (creds clobbered by applyNoGitHooksToCmd)", gotUser, gotPassword)
+	}
+}
+
+func TestWithRemoteOperationEnvRestoresS3ChecksumEnv(t *testing.T) {
+	t.Setenv(awsResponseChecksumValidationEnv, "when_supported")
+
+	err := withRemoteOperationEnv(nil, true, func() error {
+		if got := os.Getenv(awsResponseChecksumValidationEnv); got != "when_required" {
+			t.Fatalf("%s during operation = %q, want when_required", awsResponseChecksumValidationEnv, got)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("withRemoteOperationEnv returned error: %v", err)
+	}
+	if got := os.Getenv(awsResponseChecksumValidationEnv); got != "when_supported" {
+		t.Fatalf("%s after operation = %q, want restored when_supported", awsResponseChecksumValidationEnv, got)
+	}
+}
+
+func TestWithRemoteOperationEnvUnsetsS3ChecksumEnv(t *testing.T) {
+	t.Setenv(awsResponseChecksumValidationEnv, "")
+	if err := os.Unsetenv(awsResponseChecksumValidationEnv); err != nil {
+		t.Fatalf("unset %s: %v", awsResponseChecksumValidationEnv, err)
+	}
+
+	err := withRemoteOperationEnv(nil, true, func() error {
+		if got := os.Getenv(awsResponseChecksumValidationEnv); got != "when_required" {
+			t.Fatalf("%s during operation = %q, want when_required", awsResponseChecksumValidationEnv, got)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("withRemoteOperationEnv returned error: %v", err)
+	}
+	if _, ok := os.LookupEnv(awsResponseChecksumValidationEnv); ok {
+		t.Fatalf("%s should be unset after operation", awsResponseChecksumValidationEnv)
+	}
+}
+
+func TestIsS3RemoteURL(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+		want bool
+	}{
+		{name: "dolt aws", url: "aws://[table:bucket]/db", want: true},
+		{name: "s3", url: "s3://bucket/path", want: true},
+		{name: "gcs", url: "gs://bucket/path", want: false},
+		{name: "azure", url: "az://account.blob.core.windows.net/container", want: false},
+		{name: "empty", url: "", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isS3RemoteURL(tt.url); got != tt.want {
+				t.Fatalf("isS3RemoteURL(%q) = %v, want %v", tt.url, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -79,7 +214,9 @@ func TestCredentialKeyFileGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("key file should exist after initCredentialKey: %v", err)
 	}
-	if perm := info.Mode().Perm(); perm != 0600 {
+	if runtime.GOOS == "windows" {
+		t.Log("skipping POSIX mode-bit check on Windows")
+	} else if perm := info.Mode().Perm(); perm != 0600 {
 		t.Errorf("key file permissions = %o, want 0600", perm)
 	}
 
@@ -200,6 +337,105 @@ func TestInitCredentialKeyEmptyDbPath(t *testing.T) {
 	}
 }
 
+func TestEnsureCredentialKeyAlreadyInitialized(t *testing.T) {
+	tmpDir := t.TempDir()
+	key := []byte("0123456789abcdef0123456789abcdef")
+	store := &DoltStore{
+		dbPath:        filepath.Join(tmpDir, "dolt"),
+		beadsDir:      tmpDir,
+		credentialKey: append([]byte(nil), key...),
+	}
+
+	if err := store.ensureCredentialKey(t.Context()); err != nil {
+		t.Fatalf("ensureCredentialKey() error = %v", err)
+	}
+	if string(store.credentialKey) != string(key) {
+		t.Fatalf("credentialKey changed unexpectedly: got %q want %q", string(store.credentialKey), string(key))
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, credentialKeyFile)); !os.IsNotExist(err) {
+		t.Fatalf("expected no key file write when key already initialized, got err=%v", err)
+	}
+}
+
+func TestEnsureCredentialKeyInitializesWhenMissing(t *testing.T) {
+	tmpDir := t.TempDir()
+	store := &DoltStore{
+		dbPath:   filepath.Join(tmpDir, "dolt"),
+		beadsDir: tmpDir,
+	}
+
+	if err := store.ensureCredentialKey(t.Context()); err != nil {
+		t.Fatalf("ensureCredentialKey() error = %v", err)
+	}
+	if len(store.credentialKey) != 32 {
+		t.Fatalf("credentialKey length = %d, want 32", len(store.credentialKey))
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, credentialKeyFile)); err != nil {
+		t.Fatalf("expected key file after lazy init: %v", err)
+	}
+}
+
+func TestAddFederationPeerReturnsCredentialKeyInitError(t *testing.T) {
+	parentFile := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(parentFile, []byte("x"), 0o600); err != nil {
+		t.Fatalf("failed to create parent file: %v", err)
+	}
+
+	store := &DoltStore{
+		dbPath:   filepath.Join(parentFile, "dolt"),
+		beadsDir: filepath.Join(parentFile, ".beads"),
+	}
+
+	err := store.AddFederationPeer(t.Context(), &storage.FederationPeer{
+		Name:        "peerone",
+		RemoteURL:   "file:///tmp/nonexistent-peer",
+		Password:    "secret",
+		Sovereignty: "T2",
+	})
+	if err == nil {
+		t.Fatal("expected credential key initialization error")
+	}
+	if !strings.Contains(err.Error(), "failed to initialize credential key") {
+		t.Fatalf("expected credential key initialization error, got: %v", err)
+	}
+}
+
+func TestDecryptWithKeyShortCiphertext(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := decryptWithKey([]byte("short"), key); err == nil || err.Error() != "ciphertext too short" {
+		t.Fatalf("decryptWithKey(short) error = %v, want ciphertext too short", err)
+	}
+}
+
+func TestValidatePeerName(t *testing.T) {
+	tests := []struct {
+		name    string
+		peer    string
+		wantErr string
+	}{
+		{name: "valid", peer: "peer_one-2"},
+		{name: "empty", peer: "", wantErr: "peer name cannot be empty"},
+		{name: "must start with letter", peer: "1peer", wantErr: "peer name must start with a letter and contain only alphanumeric characters, hyphens, and underscores"},
+		{name: "invalid character", peer: "peer.one", wantErr: "peer name must start with a letter and contain only alphanumeric characters, hyphens, and underscores"},
+		{name: "too long", peer: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_extra", wantErr: "peer name too long (max 64 characters)"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validatePeerName(tt.peer)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validatePeerName(%q) unexpected error: %v", tt.peer, err)
+				}
+				return
+			}
+			if err == nil || err.Error() != tt.wantErr {
+				t.Fatalf("validatePeerName(%q) error = %v, want %q", tt.peer, err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestCredentialKeyMigrationFromDbPath(t *testing.T) {
 	// Simulate old layout: key file in .beads/dolt/ (dbPath)
 	beadsDir := t.TempDir()
@@ -298,9 +534,75 @@ func TestCredentialKeyCreatesBeadsDir(t *testing.T) {
 	}
 }
 
+func TestFederationPeerCredentialLifecycleLazyKeyInit(t *testing.T) {
+	skipIfNoServer(t)
+
+	ctx := context.Background()
+	baseDir := t.TempDir()
+	beadsDir := filepath.Join(baseDir, ".beads")
+	dbName := fmt.Sprintf("test_federation_credentials_%d", testServerPort)
+
+	assertDatabaseNotExists(t, testServerPort, dbName)
+	t.Cleanup(func() { dropTestDatabase(t, testServerPort, dbName) })
+
+	store, err := New(ctx, &Config{
+		Path:            filepath.Join(beadsDir, "dolt"),
+		BeadsDir:        beadsDir,
+		ServerHost:      "127.0.0.1",
+		ServerPort:      testServerPort,
+		Database:        dbName,
+		MaxOpenConns:    1,
+		CreateIfMissing: true,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer store.Close()
+
+	peer := &storage.FederationPeer{
+		Name:        "peerone",
+		RemoteURL:   "file:///tmp/nonexistent-peer",
+		Username:    "alice",
+		Password:    "s3cret",
+		Sovereignty: "T2",
+	}
+
+	if err := store.AddFederationPeer(ctx, peer); err != nil {
+		t.Fatalf("AddFederationPeer() error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(beadsDir, credentialKeyFile)); err != nil {
+		t.Fatalf("expected credential key file after adding peer with password: %v", err)
+	}
+
+	store.credentialKey = nil
+	got, err := store.GetFederationPeer(ctx, peer.Name)
+	if err != nil {
+		t.Fatalf("GetFederationPeer() error = %v", err)
+	}
+	if got.Password != peer.Password {
+		t.Fatalf("GetFederationPeer().Password = %q, want %q", got.Password, peer.Password)
+	}
+
+	store.credentialKey = nil
+	peers, err := store.ListFederationPeers(ctx)
+	if err != nil {
+		t.Fatalf("ListFederationPeers() error = %v", err)
+	}
+	if len(peers) != 1 {
+		t.Fatalf("ListFederationPeers() length = %d, want 1", len(peers))
+	}
+	if peers[0].Password != peer.Password {
+		t.Fatalf("ListFederationPeers()[0].Password = %q, want %q", peers[0].Password, peer.Password)
+	}
+}
+
 // setupCredentialTestStore creates a DoltStore with a dolt-initialized CLI directory
 // and "origin" remote for credential routing tests. Requires dolt CLI.
 func setupCredentialTestStore(t *testing.T, remoteUser, remotePassword string, serverMode, setupRemote bool) *DoltStore {
+	return setupCredentialTestStoreWithURL(t, remoteUser, remotePassword, serverMode, setupRemote, "origin", "https://example.com/repo")
+}
+
+func setupCredentialTestStoreWithURL(t *testing.T, remoteUser, remotePassword string, serverMode, setupRemote bool, remoteName, remoteURL string) *DoltStore {
 	t.Helper()
 	tmpDir := t.TempDir()
 	dbName := "testdb"
@@ -315,7 +617,7 @@ func setupCredentialTestStore(t *testing.T, remoteUser, remotePassword string, s
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("dolt init failed: %s: %v", out, err)
 		}
-		cmd = exec.Command("dolt", "remote", "add", "origin", "https://example.com/repo")
+		cmd = exec.Command("dolt", "remote", "add", remoteName, remoteURL)
 		cmd.Dir = dbDir
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("dolt remote add failed: %s: %v", out, err)
@@ -328,7 +630,7 @@ func setupCredentialTestStore(t *testing.T, remoteUser, remotePassword string, s
 		serverMode:     serverMode,
 		dbPath:         tmpDir,
 		database:       dbName,
-		remote:         "origin",
+		remote:         remoteName,
 	}
 }
 
@@ -336,9 +638,7 @@ func setupCredentialTestStore(t *testing.T, remoteUser, remotePassword string, s
 // CLI subprocess routing for Push, ForcePush, and Pull when credentials are set.
 // The guard is shared across all three operations (same insertion pattern in store.go).
 func TestCredentialCLIRouting(t *testing.T) {
-	if _, err := exec.LookPath("dolt"); err != nil {
-		t.Skip("dolt not installed, skipping credential routing test")
-	}
+	testutil.RequireDoltBinary(t)
 
 	tests := []struct {
 		name           string
@@ -359,7 +659,8 @@ func TestCredentialCLIRouting(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			store := setupCredentialTestStore(t, tt.remoteUser, tt.remotePassword, tt.serverMode, tt.setupRemote)
-			got := store.shouldUseCLIForCredentials(context.Background())
+			creds := store.mainRemoteCredentials()
+			got := store.shouldUseCLIForCredentials(context.Background(), store.remote, creds)
 			if got != tt.wantCLI {
 				t.Errorf("shouldUseCLIForCredentials() = %v, want %v", got, tt.wantCLI)
 			}
@@ -378,7 +679,7 @@ func TestCredentialCLIRoutingExternalServer(t *testing.T) {
 		database:       "testdb",
 		remote:         "origin",
 	}
-	if store.shouldUseCLIForCredentials(context.Background()) {
+	if store.shouldUseCLIForCredentials(context.Background(), store.remote, store.mainRemoteCredentials()) {
 		t.Error("expected false for external server mode (no CLI remote in CLIDir)")
 	}
 }
@@ -395,8 +696,134 @@ func TestCredentialCLIRoutingNoRemote(t *testing.T) {
 		database:       "nodb",
 		remote:         "origin",
 	}
-	if store.shouldUseCLIForCredentials(context.Background()) {
+	if store.shouldUseCLIForCredentials(context.Background(), store.remote, store.mainRemoteCredentials()) {
 		t.Error("expected false when CLI remote does not exist")
+	}
+}
+
+func TestCredentialCLIRoutingSharedServerUsesSharedDoltRoot(t *testing.T) {
+	testutil.RequireDoltBinary(t)
+
+	sharedRoot := t.TempDir()
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	t.Setenv("BEADS_SHARED_SERVER_DIR", sharedRoot)
+
+	database := "shared_credentials_db"
+	cliDir := filepath.Join(sharedRoot, "dolt", database)
+	if err := os.MkdirAll(cliDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("dolt", "init")
+	cmd.Dir = cliDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("dolt init failed: %s: %v", out, err)
+	}
+
+	cmd = exec.Command("dolt", "remote", "add", "origin", "https://example.com/repo")
+	cmd.Dir = cliDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("dolt remote add failed: %s: %v", out, err)
+	}
+
+	store := &DoltStore{
+		remoteUser:     "user",
+		remotePassword: "pass",
+		serverMode:     true,
+		beadsDir:       filepath.Join(t.TempDir(), ".beads"),
+		dbPath:         filepath.Join(t.TempDir(), ".beads", "dolt"),
+		database:       database,
+		remote:         "origin",
+	}
+
+	if !store.shouldUseCLIForCredentials(context.Background(), store.remote, store.mainRemoteCredentials()) {
+		t.Fatalf("expected shared-server credential routing to resolve CLI remote via %q, got CLIDir %q", cliDir, store.CLIDir())
+	}
+}
+
+func TestMatchingLocalRemoteCLIRouting(t *testing.T) {
+	tests := []struct {
+		name    string
+		remotes []storage.RemoteInfo
+		cliURL  string
+		remote  string
+		want    bool
+	}{
+		{
+			name:    "matching remote and url",
+			remotes: []storage.RemoteInfo{{Name: "origin", URL: "https://doltremoteapi.dolthub.com/org/repo"}},
+			cliURL:  "https://doltremoteapi.dolthub.com/org/repo",
+			remote:  "origin",
+			want:    true,
+		},
+		{
+			name:    "different url",
+			remotes: []storage.RemoteInfo{{Name: "origin", URL: "https://server.example/repo"}},
+			cliURL:  "https://local.example/repo",
+			remote:  "origin",
+			want:    false,
+		},
+		{
+			name:    "different remote",
+			remotes: []storage.RemoteInfo{{Name: "backup", URL: "https://doltremoteapi.dolthub.com/org/repo"}},
+			cliURL:  "https://doltremoteapi.dolthub.com/org/repo",
+			remote:  "origin",
+			want:    false,
+		},
+		{
+			name:    "missing cli remote",
+			remotes: []storage.RemoteInfo{{Name: "origin", URL: "https://doltremoteapi.dolthub.com/org/repo"}},
+			remote:  "origin",
+			want:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shouldUseCLIForMatchingLocalRemote(tt.remotes, tt.cliURL, tt.remote)
+			if got != tt.want {
+				t.Fatalf("shouldUseCLIForMatchingLocalRemote() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCloudAuthCLIRoutingSharedServerUsesSharedDoltRoot(t *testing.T) {
+	testutil.RequireDoltBinary(t)
+
+	sharedRoot := t.TempDir()
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	t.Setenv("BEADS_SHARED_SERVER_DIR", sharedRoot)
+	t.Setenv("AZURE_STORAGE_ACCOUNT", "myaccount")
+
+	database := "shared_cloud_auth_db"
+	cliDir := filepath.Join(sharedRoot, "dolt", database)
+	if err := os.MkdirAll(cliDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("dolt", "init")
+	cmd.Dir = cliDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("dolt init failed: %s: %v", out, err)
+	}
+
+	cmd = exec.Command("dolt", "remote", "add", "origin", "az://account.blob.core.windows.net/container")
+	cmd.Dir = cliDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("dolt remote add failed: %s: %v", out, err)
+	}
+
+	store := &DoltStore{
+		serverMode: true,
+		beadsDir:   filepath.Join(t.TempDir(), ".beads"),
+		dbPath:     filepath.Join(t.TempDir(), ".beads", "dolt"),
+		database:   database,
+		remote:     "origin",
+	}
+
+	if !store.shouldUseCLIForCloudAuth(store.remote) {
+		t.Fatalf("expected shared-server cloud-auth routing to resolve CLI remote via %q, got CLIDir %q", cliDir, store.CLIDir())
 	}
 }
 
@@ -404,9 +831,7 @@ func TestCredentialCLIRoutingNoRemote(t *testing.T) {
 // that controls CLI subprocess routing for federation PushTo, PullFrom, and Fetch
 // when peer credentials are resolved from the federation_peers table.
 func TestFederationCredentialCLIRouting(t *testing.T) {
-	if _, err := exec.LookPath("dolt"); err != nil {
-		t.Skip("dolt not installed, skipping credential routing test")
-	}
+	testutil.RequireDoltBinary(t)
 
 	tests := []struct {
 		name        string
@@ -440,42 +865,158 @@ func TestFederationCredentialCLIRouting(t *testing.T) {
 }
 
 func TestCloudAuthCLIRouting(t *testing.T) {
-	if _, err := exec.LookPath("dolt"); err != nil {
-		t.Skip("dolt not installed")
-	}
+	testutil.RequireDoltBinary(t)
 
 	tests := []struct {
-		name        string
-		serverMode  bool
-		setupRemote bool
-		envKey      string // env var to set (empty = none)
-		envValue    string
-		wantCLI     bool
+		name      string
+		remoteURL string // URL scheme determines which env vars are relevant
+		envKey    string // env var to set (empty = none)
+		envValue  string
+		wantCLI   bool
 	}{
-		// Positive: cloud env + server mode + remote configured → CLI
-		{"azure storage account", true, true, "AZURE_STORAGE_ACCOUNT", "myaccount", true},
-		{"azure storage key", true, true, "AZURE_STORAGE_KEY", "mykey", true},
-		{"aws access key", true, true, "AWS_ACCESS_KEY_ID", "AKID", true},
-		{"aws secret key", true, true, "AWS_SECRET_ACCESS_KEY", "secret", true},
-		{"google creds", true, true, "GOOGLE_APPLICATION_CREDENTIALS", "/path/to/creds.json", true},
-		{"gcs creds file", true, true, "GCS_CREDENTIALS_FILE", "/path/to/creds.json", true},
-		{"oci var", true, true, "OCI_TENANCY", "ocid1.tenancy", true},
-		{"dolt remote user", true, true, "DOLT_REMOTE_USER", "admin", true},
-		// Negative: missing conditions → SQL fallback
-		{"no cloud env", true, true, "", "", false},
-		{"embedded mode", false, true, "AZURE_STORAGE_ACCOUNT", "myaccount", false},
-		{"no CLI remote", true, false, "AZURE_STORAGE_ACCOUNT", "myaccount", false},
+		// Per-scheme positive: env var matches remote's scheme → CLI routing
+		{"azure env + az:// remote", "az://account.blob.core.windows.net/container", "AZURE_STORAGE_ACCOUNT", "myaccount", true},
+		{"azure key + az:// remote", "az://account.blob.core.windows.net/container", "AZURE_STORAGE_KEY", "mykey", true},
+		{"aws env + s3:// remote", "s3://my-bucket/path", "AWS_ACCESS_KEY_ID", "AKID", true},
+		{"aws secret + s3:// remote", "s3://my-bucket/path", "AWS_SECRET_ACCESS_KEY", "secret", true},
+		{"google creds + gs:// remote", "gs://my-bucket/path", "GOOGLE_APPLICATION_CREDENTIALS", "/path/to/creds.json", true},
+		{"gcs creds + gs:// remote", "gs://my-bucket/path", "GCS_CREDENTIALS_FILE", "/path/to/creds.json", true},
+		{"oci env + oci:// remote", "oci://my-namespace/my-bucket/path", "OCI_TENANCY", "ocid1.tenancy", true},
+		{"dolt env + dolthub:// remote", "dolthub://org/beads", "DOLT_REMOTE_USER", "admin", true},
+		{"dolt env + https:// remote", "https://example.com/repo", "DOLT_REMOTE_USER", "admin", true},
+		{"dolt env + http:// remote", "http://example.com/repo", "DOLT_REMOTE_USER", "admin", true},
+
+		// Per-scheme negative: env var does NOT match remote's scheme → SQL fallback
+		{"azure env + dolthub:// remote", "dolthub://org/beads", "AZURE_STORAGE_ACCOUNT", "myaccount", false},
+		{"azure env + https:// remote", "https://example.com/repo", "AZURE_STORAGE_ACCOUNT", "myaccount", false},
+		{"azure env + s3:// remote", "s3://my-bucket/path", "AZURE_STORAGE_ACCOUNT", "myaccount", false},
+		{"aws env + az:// remote", "az://account.blob.core.windows.net/container", "AWS_ACCESS_KEY_ID", "AKID", false},
+		{"dolt env + az:// remote", "az://account.blob.core.windows.net/container", "DOLT_REMOTE_USER", "admin", false},
+
+		// Structural negative: missing conditions → SQL fallback
+		{"no cloud env", "az://account.blob.core.windows.net/container", "", "", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Use a clean store (no remoteUser/remotePassword — cloud auth uses env vars)
-			store := setupCredentialTestStore(t, "", "", tt.serverMode, tt.setupRemote)
+			store := setupCredentialTestStoreWithURL(t, "", "", true, true, "origin", tt.remoteURL)
 			if tt.envKey != "" {
 				t.Setenv(tt.envKey, tt.envValue)
 			}
-			got := store.shouldUseCLIForCloudAuth()
+			got := store.shouldUseCLIForCloudAuth(store.remote)
 			if got != tt.wantCLI {
 				t.Errorf("shouldUseCLIForCloudAuth() = %v, want %v", got, tt.wantCLI)
+			}
+		})
+	}
+}
+
+func TestCloudAuthCLIRoutingStructural(t *testing.T) {
+	testutil.RequireDoltBinary(t)
+
+	t.Run("embedded mode", func(t *testing.T) {
+		store := setupCredentialTestStoreWithURL(t, "", "", false, true, "origin", "az://account.blob.core.windows.net/container")
+		t.Setenv("AZURE_STORAGE_ACCOUNT", "myaccount")
+		if store.shouldUseCLIForCloudAuth(store.remote) {
+			t.Error("expected false in embedded mode")
+		}
+	})
+	t.Run("no CLI remote", func(t *testing.T) {
+		store := setupCredentialTestStoreWithURL(t, "", "", true, false, "origin", "az://account.blob.core.windows.net/container")
+		t.Setenv("AZURE_STORAGE_ACCOUNT", "myaccount")
+		if store.shouldUseCLIForCloudAuth(store.remote) {
+			t.Error("expected false when CLI remote not configured")
+		}
+	})
+}
+
+// TestPerRemoteCloudAuthHybrid verifies the core use case: a hybrid setup with
+// DoltHub (primary) + Azure (backup) remotes. AZURE_STORAGE_ACCOUNT should
+// trigger CLI routing ONLY for the Azure remote, not the DoltHub remote.
+func TestPerRemoteCloudAuthHybrid(t *testing.T) {
+	testutil.RequireDoltBinary(t)
+
+	tmpDir := t.TempDir()
+	dbName := "testdb"
+	dbDir := filepath.Join(tmpDir, dbName)
+	if err := os.MkdirAll(dbDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("dolt", "init")
+	cmd.Dir = dbDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("dolt init: %s: %v", out, err)
+	}
+	// Add two remotes: DoltHub primary + Azure backup
+	cmd = exec.Command("dolt", "remote", "add", "primary", "dolthub://org/beads")
+	cmd.Dir = dbDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("dolt remote add primary: %s: %v", out, err)
+	}
+	cmd = exec.Command("dolt", "remote", "add", "backup", "az://account.blob.core.windows.net/dolt/beads")
+	cmd.Dir = dbDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("dolt remote add backup: %s: %v", out, err)
+	}
+
+	store := &DoltStore{
+		serverMode: true,
+		dbPath:     tmpDir,
+		database:   dbName,
+		remote:     "primary",
+	}
+
+	t.Setenv("AZURE_STORAGE_ACCOUNT", "myaccount")
+
+	// Azure remote should get CLI routing (AZURE_STORAGE_ env matches az:// scheme)
+	if !store.shouldUseCLIForCloudAuth("backup") {
+		t.Error("expected CLI routing for az:// remote when AZURE_STORAGE_ACCOUNT is set")
+	}
+
+	// DoltHub remote should NOT get CLI routing (AZURE_STORAGE_ does not match dolthub:// scheme)
+	if store.shouldUseCLIForCloudAuth("primary") {
+		t.Error("expected SQL routing for dolthub:// remote when AZURE_STORAGE_ACCOUNT is set — per-remote resolution should prevent misrouting")
+	}
+}
+
+// TestEnvPrefixesForRemoteURL verifies the scheme-to-env-prefix mapping.
+func TestEnvPrefixesForRemoteURL(t *testing.T) {
+	tests := []struct {
+		url     string
+		wantNil bool
+		wantHas string // one prefix we expect to find
+	}{
+		{"az://account.blob.core.windows.net/container", false, "AZURE_STORAGE_"},
+		{"s3://my-bucket/path", false, "AWS_"},
+		{"gs://my-bucket/path", false, "GOOGLE_"},
+		{"oci://namespace/bucket/path", false, "OCI_"},
+		{"dolthub://org/repo", false, "DOLT_REMOTE_"},
+		{"https://dolthub.com/org/repo", false, "DOLT_REMOTE_"},
+		{"http://localhost:8080/repo", false, "DOLT_REMOTE_"},
+		{"git+ssh://host/repo", true, ""},  // git protocol — handled elsewhere
+		{"ssh://host/repo", true, ""},      // git protocol — handled elsewhere
+		{"file:///path/to/repo", true, ""}, // local filesystem — no cloud auth
+		{"git@host:repo.git", true, ""},    // SCP-style — handled elsewhere
+	}
+	for _, tt := range tests {
+		t.Run(tt.url, func(t *testing.T) {
+			got := envPrefixesForRemoteURL(tt.url)
+			if tt.wantNil && got != nil {
+				t.Errorf("envPrefixesForRemoteURL(%q) = %v, want nil", tt.url, got)
+			}
+			if !tt.wantNil {
+				if got == nil {
+					t.Fatalf("envPrefixesForRemoteURL(%q) = nil, want non-nil", tt.url)
+				}
+				found := false
+				for _, p := range got {
+					if p == tt.wantHas {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("envPrefixesForRemoteURL(%q) = %v, missing %q", tt.url, got, tt.wantHas)
+				}
 			}
 		})
 	}

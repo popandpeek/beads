@@ -4,9 +4,9 @@ import type * as Preset from '@docusaurus/preset-classic';
 
 // Environment-based URL configuration for fork flexibility
 // SITE_URL: Full URL (e.g., "https://myuser.github.io/beads" or "https://myuser.github.io")
-// ORG_NAME: GitHub organization/user name (defaults to "steveyegge")
+// ORG_NAME: GitHub organization/user name (defaults to "gastownhall")
 // PROJECT_NAME: Repository/project name (defaults to "beads")
-const orgName = process.env.ORG_NAME || 'steveyegge';
+const orgName = process.env.ORG_NAME || 'gastownhall';
 const projectName = process.env.PROJECT_NAME || 'beads';
 const siteUrlEnv = process.env.SITE_URL || `https://${orgName}.github.io/${projectName}`;
 
@@ -29,10 +29,6 @@ const config: Config = {
   tagline: 'Dolt-powered issue tracker for AI-supervised coding workflows',
   favicon: 'img/favicon.svg',
 
-  // Enable Mermaid diagrams in markdown
-  markdown: {
-    mermaid: true,
-  },
   themes: ['@docusaurus/theme-mermaid'],
 
   // future: {
@@ -49,6 +45,7 @@ const config: Config = {
   onBrokenLinks: 'warn',
 
   markdown: {
+    mermaid: true,
     hooks: {
       onBrokenMarkdownLinks: 'warn',
     },
@@ -92,8 +89,16 @@ const config: Config = {
         docs: {
           routeBasePath: '/', // Docs as homepage
           sidebarPath: './sidebars.ts',
-          editUrl: `https://github.com/${orgName}/${projectName}/tree/docs/docusaurus-site/website/`,
+          editUrl: `https://github.com/${orgName}/${projectName}/tree/main/website/`,
           showLastUpdateTime: true,
+          // Default site view is the latest released snapshot, not unreleased "Next"
+          lastVersion: '1.0.5',
+          versions: {
+            current: {
+              label: 'Next',
+              banner: 'unreleased',
+            },
+          },
         },
         blog: false, // Disable blog
         theme: {
@@ -121,6 +126,10 @@ const config: Config = {
           sidebarId: 'docsSidebar',
           position: 'left',
           label: 'Documentation',
+        },
+        {
+          type: 'docsVersionDropdown',
+          position: 'right',
         },
         {
           href: `pathname://${baseUrl}llms.txt`,
@@ -158,12 +167,64 @@ const config: Config = {
           title: 'Integrations',
           items: [
             {
+              label: 'Overview',
+              to: '/integrations',
+            },
+            {
+              label: 'Aider',
+              to: '/integrations/aider',
+            },
+            {
               label: 'Claude Code',
               to: '/integrations/claude-code',
             },
             {
+              label: 'Codex',
+              to: '/integrations/codex',
+            },
+            {
+              label: 'Cody',
+              to: '/integrations/cody',
+            },
+            {
+              label: 'Cursor',
+              to: '/integrations/cursor',
+            },
+            {
+              label: 'Factory.ai Droid',
+              to: '/integrations/factory',
+            },
+            {
+              label: 'Gemini CLI',
+              to: '/integrations/gemini',
+            },
+            {
+              label: 'Junie',
+              to: '/integrations/junie',
+            },
+            {
+              label: 'Kilo Code',
+              to: '/integrations/kilocode',
+            },
+            {
+              label: 'Mux',
+              to: '/integrations/mux',
+            },
+            {
+              label: 'OpenCode',
+              to: '/integrations/opencode',
+            },
+            {
+              label: 'Windsurf',
+              to: '/integrations/windsurf',
+            },
+            {
               label: 'MCP Server',
               to: '/integrations/mcp-server',
+            },
+            {
+              label: 'GitHub Copilot',
+              to: '/integrations/github-copilot',
             },
           ],
         },

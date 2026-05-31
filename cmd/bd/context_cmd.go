@@ -6,7 +6,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
 )
@@ -22,10 +21,12 @@ type ContextInfo struct {
 	DoltMode      string `json:"dolt_mode"`
 	ServerHost    string `json:"server_host,omitempty"`
 	ServerPort    int    `json:"server_port,omitempty"`
+	ProxiedDir    string `json:"proxied_dir,omitempty"`
 	Database      string `json:"database"`
 	DataDir       string `json:"data_dir,omitempty"`
 	ProjectID     string `json:"project_id,omitempty"`
-	SyncGitRemote string `json:"sync_git_remote,omitempty"`
+	SyncRemote    string `json:"sync_remote,omitempty"`
+	SyncGitRemote string `json:"sync_git_remote,omitempty"` // Deprecated: use sync_remote
 	Role          string `json:"role,omitempty"`
 	BdVersion     string `json:"bd_version"`
 }
@@ -51,7 +52,7 @@ Examples:
 		}
 
 		// Resolve repo context (works without DB open)
-		if selected := selectedNoDBBeadsDir(); selected != "" {
+		if selected := selectedNoDBBeadsDir(cmd); selected != "" {
 			prepareSelectedNoDBContext(selected)
 		}
 
@@ -97,14 +98,22 @@ Examples:
 			dsCfg := doltserver.DefaultConfig(rc.BeadsDir)
 			info.ServerPort = dsCfg.Port
 		}
+		if cfg.IsDoltProxiedServerMode() {
+			p, err := resolveProxiedServerRootPath(rc.BeadsDir)
+			if err != nil {
+				FatalError("resolve proxied server root: %v", err)
+			}
+			info.ProxiedDir = p
+		}
 
 		if dataDir := cfg.GetDoltDataDir(); dataDir != "" {
 			info.DataDir = dataDir
 		}
 
-		// Read sync.git-remote from the selected repo's config.yaml.
-		if remote := config.GetStringFromDir(rc.BeadsDir, "sync.git-remote"); remote != "" {
-			info.SyncGitRemote = remote
+		// Read sync remote from the selected repo's config.yaml.
+		if remote := resolveSyncRemoteFromDir(rc.BeadsDir); remote != "" {
+			info.SyncRemote = remote
+			info.SyncGitRemote = remote // Deprecated: kept for backwards compat
 		}
 
 		if jsonOutput {
@@ -145,6 +154,9 @@ func printContextText(info ContextInfo) {
 	if info.ServerHost != "" {
 		fmt.Printf("  server:       %s:%d\n", info.ServerHost, info.ServerPort)
 	}
+	if info.ProxiedDir != "" {
+		fmt.Printf("  proxied dir:  %s\n", info.ProxiedDir)
+	}
 	if info.DataDir != "" {
 		fmt.Printf("  data dir:     %s\n", info.DataDir)
 	}
@@ -153,10 +165,10 @@ func printContextText(info ContextInfo) {
 	}
 
 	// Sync
-	if info.SyncGitRemote != "" {
+	if info.SyncRemote != "" {
 		fmt.Println()
 		fmt.Println("Sync:")
-		fmt.Printf("  git remote:   %s\n", info.SyncGitRemote)
+		fmt.Printf("  remote:       %s\n", info.SyncRemote)
 	}
 }
 

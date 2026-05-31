@@ -1,13 +1,20 @@
 """Test workspace auto-detection from CWD (bd-8zf2)."""
 
 import os
-import pytest
+import subprocess
 import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from beads_mcp.tools import _find_beads_db_in_tree, _get_client, current_workspace
+import pytest
+
 from beads_mcp.bd_client import BdError
+from beads_mcp.tools import (
+    _find_beads_db_in_tree,
+    _get_client,
+    _has_beads_project_files,
+    current_workspace,
+)
 
 
 def test_find_beads_db_in_tree_direct():
@@ -17,7 +24,7 @@ def test_find_beads_db_in_tree_direct():
         beads_dir = Path(tmpdir) / ".beads"
         beads_dir.mkdir()
         (beads_dir / "beads.db").touch()
-        
+
         # Should find workspace root (use realpath for macOS symlink resolution)
         result = _find_beads_db_in_tree(tmpdir)
         assert result == os.path.realpath(tmpdir)
@@ -30,11 +37,11 @@ def test_find_beads_db_in_tree_parent():
         beads_dir = Path(tmpdir) / ".beads"
         beads_dir.mkdir()
         (beads_dir / "beads.db").touch()
-        
+
         # Create subdirectory
         subdir = Path(tmpdir) / "subdir" / "deep"
         subdir.mkdir(parents=True)
-        
+
         # Should find workspace root (walks up from subdir)
         result = _find_beads_db_in_tree(str(subdir))
         assert result == os.path.realpath(tmpdir)
@@ -53,13 +60,13 @@ def test_find_beads_db_excludes_backups():
     with tempfile.TemporaryDirectory() as tmpdir:
         beads_dir = Path(tmpdir) / ".beads"
         beads_dir.mkdir()
-        
+
         # Only backup file exists
         (beads_dir / "beads.db.backup").touch()
-        
+
         result = _find_beads_db_in_tree(tmpdir)
         assert result is None  # Should not find backup files
-        
+
         # Add valid db file
         (beads_dir / "beads.db").touch()
         result = _find_beads_db_in_tree(tmpdir)
@@ -74,21 +81,23 @@ async def test_get_client_auto_detect_from_cwd():
         beads_dir = Path(tmpdir) / ".beads"
         beads_dir.mkdir()
         (beads_dir / "beads.db").touch()
-        
+
         # Reset ContextVar for this test
         token = current_workspace.set(None)
         try:
-            with patch.dict(os.environ, {}, clear=True):
-                # Mock _find_beads_db_in_tree to return our tmpdir
-                with patch("beads_mcp.tools._find_beads_db_in_tree", return_value=tmpdir):
-                    # Mock create_bd_client to avoid actual connection
-                    mock_client = AsyncMock()
-                    mock_client.ping = AsyncMock(return_value=None)
-                    
-                    with patch("beads_mcp.tools.create_bd_client", return_value=mock_client):
-                        # Should auto-detect and not raise error
-                        client = await _get_client()
-                        assert client is not None
+            with (
+                patch.dict(os.environ, {}, clear=True),
+                patch("beads_mcp.tools._find_beads_db_in_tree", return_value=tmpdir),
+                patch("beads_mcp.tools.create_bd_client") as mock_create,
+            ):
+                # Mock create_bd_client to avoid actual connection
+                mock_client = AsyncMock()
+                mock_client.ping = AsyncMock(return_value=None)
+                mock_create.return_value = mock_client
+
+                # Should auto-detect and not raise error
+                client = await _get_client()
+                assert client is not None
         finally:
             current_workspace.reset(token)
 
@@ -99,16 +108,18 @@ async def test_get_client_no_workspace_found():
     # Reset ContextVar for this test
     token = current_workspace.set(None)
     try:
-        with patch.dict(os.environ, {}, clear=True):
-            with patch("beads_mcp.tools._find_beads_db_in_tree", return_value=None):
-                with pytest.raises(BdError) as exc_info:
-                    await _get_client()
-                
-                # Verify error message is helpful
-                error_msg = str(exc_info.value)
-                assert "No beads workspace found" in error_msg
-                assert "context" in error_msg
-                assert ".beads/" in error_msg
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("beads_mcp.tools._find_beads_db_in_tree", return_value=None),
+            pytest.raises(BdError) as exc_info,
+        ):
+            await _get_client()
+
+        # Verify error message is helpful
+        error_msg = str(exc_info.value)
+        assert "No beads workspace found" in error_msg
+        assert "context" in error_msg
+        assert ".beads/" in error_msg
     finally:
         current_workspace.reset(token)
 
@@ -117,16 +128,16 @@ async def test_get_client_no_workspace_found():
 async def test_get_client_prefers_context_var_over_auto_detect():
     """Test that explicit workspace_root parameter takes precedence."""
     explicit_workspace = "/explicit/path"
-    
+
     token = current_workspace.set(explicit_workspace)
     try:
         with patch("beads_mcp.tools._canonicalize_path", return_value=explicit_workspace):
             mock_client = AsyncMock()
             mock_client.ping = AsyncMock(return_value=None)
-            
+
             with patch("beads_mcp.tools.create_bd_client", return_value=mock_client) as mock_create:
-                client = await _get_client()
-                
+                await _get_client()
+
                 # Should use explicit workspace, not auto-detect
                 mock_create.assert_called_once()
                 # The working_dir parameter should be the canonicalized explicit path
@@ -142,16 +153,19 @@ async def test_get_client_env_var_over_auto_detect():
 
     token = current_workspace.set(None)
     try:
-        with patch.dict(os.environ, {"BEADS_WORKING_DIR": env_workspace}):
-            with patch("beads_mcp.tools._canonicalize_path", return_value=env_workspace):
-                mock_client = AsyncMock()
-                mock_client.ping = AsyncMock(return_value=None)
+        with (
+            patch.dict(os.environ, {"BEADS_WORKING_DIR": env_workspace}),
+            patch("beads_mcp.tools._canonicalize_path", return_value=env_workspace),
+            patch("beads_mcp.tools.create_bd_client") as mock_create,
+        ):
+            mock_client = AsyncMock()
+            mock_client.ping = AsyncMock(return_value=None)
+            mock_create.return_value = mock_client
 
-                with patch("beads_mcp.tools.create_bd_client", return_value=mock_client):
-                    client = await _get_client()
+            client = await _get_client()
 
-                    # Should use env var, not call auto-detect
-                    assert client is not None
+            # Should use env var, not call auto-detect
+            assert client is not None
     finally:
         current_workspace.reset(token)
 
@@ -272,3 +286,169 @@ def test_find_beads_db_prefers_redirect_over_parent():
         # Should follow redirect (to remote), not walk up to parent
         result = _find_beads_db_in_tree(str(child_dir))
         assert result == os.path.realpath(str(remote_dir))
+
+
+# --- GH#2997: embedded Dolt and other backend detection ---
+
+
+def test_find_beads_db_embedded_dolt():
+    """Embedded Dolt projects have no *.db file; detect via metadata.json."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        beads_dir = Path(tmpdir) / ".beads"
+        beads_dir.mkdir()
+        (beads_dir / "metadata.json").write_text(
+            '{"backend":"dolt","dolt_mode":"embedded","dolt_database":"therm"}'
+        )
+        (beads_dir / "embeddeddolt").mkdir()
+
+        result = _find_beads_db_in_tree(tmpdir)
+        assert result == os.path.realpath(tmpdir)
+
+
+def test_find_beads_db_dolt_server():
+    """Server-mode Dolt: detect via metadata.json + dolt/ dir."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        beads_dir = Path(tmpdir) / ".beads"
+        beads_dir.mkdir()
+        (beads_dir / "metadata.json").write_text('{"backend":"dolt"}')
+        (beads_dir / "dolt").mkdir()
+
+        result = _find_beads_db_in_tree(tmpdir)
+        assert result == os.path.realpath(tmpdir)
+
+
+def test_find_beads_db_metadata_only():
+    """metadata.json alone is sufficient evidence of a beads project."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        beads_dir = Path(tmpdir) / ".beads"
+        beads_dir.mkdir()
+        (beads_dir / "metadata.json").write_text('{"backend":"sqlite"}')
+
+        result = _find_beads_db_in_tree(tmpdir)
+        assert result == os.path.realpath(tmpdir)
+
+
+def test_find_beads_db_redirect_to_dolt():
+    """Redirect to an embedded Dolt project should be accepted."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        main_dir = Path(tmpdir) / "main"
+        main_dir.mkdir()
+        main_beads = main_dir / ".beads"
+        main_beads.mkdir()
+        (main_beads / "metadata.json").write_text('{"backend":"dolt","dolt_mode":"embedded"}')
+        (main_beads / "embeddeddolt").mkdir()
+
+        worker = Path(tmpdir) / "worker"
+        worker.mkdir()
+        worker_beads = worker / ".beads"
+        worker_beads.mkdir()
+        (worker_beads / "redirect").write_text("../main/.beads")
+
+        result = _find_beads_db_in_tree(str(worker))
+        assert result == os.path.realpath(str(main_dir))
+
+
+def test_find_beads_db_worktree_falls_back_to_shared_main_repo():
+    """Shared worktrees should resolve main repo .beads even without a local .beads."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        main_dir = Path(tmpdir) / "main"
+        main_dir.mkdir()
+
+        subprocess.run(["git", "init", "-b", "main"], cwd=main_dir, check=True, capture_output=True, text=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"],
+            cwd=main_dir,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Test User"],
+            cwd=main_dir,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        (main_dir / "README.md").write_text("hello\n")
+        subprocess.run(["git", "add", "README.md"], cwd=main_dir, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=main_dir, check=True, capture_output=True, text=True)
+
+        main_beads = main_dir / ".beads"
+        main_beads.mkdir()
+        (main_beads / "config.yaml").write_text("dolt:\n  mode: server\n")
+
+        worktree_dir = Path(tmpdir) / "feature"
+        subprocess.run(
+            ["git", "worktree", "add", str(worktree_dir), "-b", "feature"],
+            cwd=main_dir,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        nested_dir = worktree_dir / "nested" / "deeper"
+        nested_dir.mkdir(parents=True)
+
+        result = _find_beads_db_in_tree(str(nested_dir))
+        assert result == os.path.realpath(str(main_dir))
+
+
+def test_find_beads_db_worktree_does_not_leak_to_unrelated_ancestor():
+    """Worktree auto-detect must stop at the current repo boundary."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        outer_dir = Path(tmpdir) / "outer"
+        outer_dir.mkdir()
+        outer_beads = outer_dir / ".beads"
+        outer_beads.mkdir()
+        (outer_beads / "beads.db").touch()
+
+        main_dir = outer_dir / "main"
+        main_dir.mkdir()
+
+        subprocess.run(["git", "init", "-b", "main"], cwd=main_dir, check=True, capture_output=True, text=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"],
+            cwd=main_dir,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Test User"],
+            cwd=main_dir,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        (main_dir / "README.md").write_text("hello\n")
+        subprocess.run(["git", "add", "README.md"], cwd=main_dir, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=main_dir, check=True, capture_output=True, text=True)
+
+        worktree_dir = Path(tmpdir) / "feature"
+        subprocess.run(
+            ["git", "worktree", "add", str(worktree_dir), "-b", "feature"],
+            cwd=main_dir,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        nested_dir = worktree_dir / "nested"
+        nested_dir.mkdir()
+
+        result = _find_beads_db_in_tree(str(nested_dir))
+        assert result is None
+
+
+def test_has_beads_project_files_excludes_vc_db():
+    """vc.db alone doesn't count as a beads project."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        beads_dir = Path(tmpdir) / ".beads"
+        beads_dir.mkdir()
+        (beads_dir / "vc.db").touch()
+        (beads_dir / "beads.db.backup").touch()
+
+        assert _has_beads_project_files(str(beads_dir)) is False
+
+        (beads_dir / "beads.db").touch()
+        assert _has_beads_project_files(str(beads_dir)) is True

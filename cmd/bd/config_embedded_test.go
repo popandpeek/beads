@@ -19,11 +19,11 @@ func bdConfig(t *testing.T, bd, dir string, args ...string) string {
 	cmd := exec.Command(bd, fullArgs...)
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd config %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		t.Fatalf("bd config %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
-	return string(out)
+	return stdout.String()
 }
 
 // bdConfigFail runs "bd config" expecting failure.
@@ -46,18 +46,27 @@ func bdConfigListJSON(t *testing.T, bd, dir string) map[string]string {
 	cmd := exec.Command(bd, "config", "list", "--json")
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd config list --json failed: %v\n%s", err, out)
+		t.Fatalf("bd config list --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 	}
-	s := strings.TrimSpace(string(out))
+	s := strings.TrimSpace(stdout.String())
 	start := strings.Index(s, "{")
 	if start < 0 {
 		t.Fatalf("no JSON object in config list output: %s", s)
 	}
-	var m map[string]string
-	if err := json.Unmarshal([]byte(s[start:]), &m); err != nil {
+	var raw map[string]interface{}
+	if err := json.Unmarshal([]byte(s[start:]), &raw); err != nil {
 		t.Fatalf("parse config list JSON: %v\n%s", err, s)
+	}
+	m := make(map[string]string, len(raw))
+	for k, v := range raw {
+		if k == "schema_version" {
+			continue
+		}
+		if sv, ok := v.(string); ok {
+			m[k] = sv
+		}
 	}
 	return m
 }
@@ -95,6 +104,14 @@ func TestEmbeddedConfig(t *testing.T) {
 		out := bdConfig(t, bd, dir, "get", "jira.url")
 		if !strings.Contains(out, "https://example.atlassian.net") {
 			t.Errorf("expected jira URL in output: %s", out)
+		}
+	})
+
+	t.Run("config_set_and_get_linear_state_map_dotted_key", func(t *testing.T) {
+		bdConfig(t, bd, dir, "set", "linear.state_map.closed", "Done")
+		out := bdConfig(t, bd, dir, "get", "linear.state_map.closed")
+		if strings.TrimSpace(out) != "Done" {
+			t.Errorf("expected exact state_map value, got: %s", out)
 		}
 	})
 
@@ -245,14 +262,21 @@ func TestEmbeddedConfigConcurrent(t *testing.T) {
 	wg.Wait()
 
 	for _, r := range results {
-		if r.err != nil {
+		if r.err != nil && !strings.Contains(r.err.Error(), "one writer at a time") {
 			t.Errorf("worker %d failed: %v", r.worker, r.err)
 		}
 	}
 
-	// Verify all keys exist after concurrent writes
+	// Verify keys only for workers that succeeded (err==nil).
+	// With exclusive flock, some workers may fail with "one writer at a time".
 	m := bdConfigListJSON(t, bd, dir)
-	for w := 0; w < numWorkers; w++ {
+	var successCount int
+	for _, r := range results {
+		if r.err != nil {
+			continue
+		}
+		successCount++
+		w := r.worker
 		for i := 0; i < 5; i++ {
 			key := fmt.Sprintf("worker%d.key%d", w, i)
 			expected := fmt.Sprintf("value-%d-%d", w, i)
@@ -260,5 +284,8 @@ func TestEmbeddedConfigConcurrent(t *testing.T) {
 				t.Errorf("after concurrent writes: key %s expected %q, got %q (exists=%v)", key, expected, v, ok)
 			}
 		}
+	}
+	if successCount == 0 {
+		t.Fatal("expected at least 1 worker to succeed")
 	}
 }

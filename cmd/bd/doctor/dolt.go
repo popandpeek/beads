@@ -4,8 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -16,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/doltserver"
 
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
 // openDoltDB opens a connection to the Dolt SQL server via MySQL protocol.
@@ -31,7 +30,6 @@ func openDoltDB(beadsDir string) (*sql.DB, *configfile.Config, error) {
 	host := cfg.GetDoltServerHost()
 	user := cfg.GetDoltServerUser()
 	database := cfg.GetDoltDatabase()
-	password := os.Getenv("BEADS_DOLT_PASSWORD")
 
 	// Use doltserver.DefaultConfig for port resolution (env > port file > config.yaml).
 	// Port 0 means no server running yet.
@@ -41,14 +39,22 @@ func openDoltDB(beadsDir string) (*sql.DB, *configfile.Config, error) {
 		return nil, nil, fmt.Errorf("no Dolt server port configured and no server running; run any bd command to auto-start")
 	}
 
-	var connStr string
-	if password != "" {
-		connStr = fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true&timeout=5s",
-			user, password, host, port, database)
-	} else {
-		connStr = fmt.Sprintf("%s@tcp(%s:%d)/%s?parseTime=true&timeout=5s",
-			user, host, port, database)
-	}
+	// Resolve the password using the credentials file fallback keyed by the
+	// resolved runtime port — matching the CRUD path. Env var BEADS_DOLT_PASSWORD
+	// still takes precedence inside GetDoltServerPasswordForPort. Without this,
+	// externally-hosted Dolt servers that keep credentials in
+	// ~/.config/beads/credentials fail doctor checks with "Access denied" while
+	// regular CRUD commands succeed (bd-h5k7).
+	password := cfg.GetDoltServerPasswordForPort(port)
+
+	connStr := doltutil.ServerDSN{
+		Host:     host,
+		Port:     port,
+		User:     user,
+		Password: password,
+		Database: database,
+		TLS:      cfg.GetDoltServerTLS(),
+	}.String()
 
 	db, err := sql.Open("mysql", connStr)
 	if err != nil {
@@ -279,24 +285,27 @@ func checkSchemaWithDB(conn *doltConn) DoctorCheck {
 		}
 	}
 
-	// Check dolt_ignore'd tables (wisps) — these only exist in the working
-	// set and must be recreated each server session. (GH#2271)
-	wispTables := []string{"wisps", "wisp_labels", "wisp_dependencies", "wisp_events", "wisp_comments"}
-	var missingWispTables []string
-	for _, table := range wispTables {
+	// Check dolt_ignore'd tables — these only exist in the working set and
+	// must be recreated each server session. (GH#2271)
+	ignoredTables := []string{
+		"local_metadata", "repo_mtimes",
+		"wisps", "wisp_labels", "wisp_dependencies", "wisp_events", "wisp_comments",
+	}
+	var missingIgnoredTables []string
+	for _, table := range ignoredTables {
 		var count int
 		err := conn.db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s LIMIT 1", table)).Scan(&count)
 		if err != nil {
-			missingWispTables = append(missingWispTables, table)
+			missingIgnoredTables = append(missingIgnoredTables, table)
 		}
 	}
 
-	if len(missingWispTables) > 0 {
+	if len(missingIgnoredTables) > 0 {
 		return DoctorCheck{
 			Name:     "Dolt Schema",
 			Status:   StatusWarning,
-			Message:  fmt.Sprintf("Missing ephemeral tables: %v (will be recreated on next bd command)", missingWispTables),
-			Detail:   "Wisps tables are dolt_ignore'd and must be recreated each server session (GH#2271)",
+			Message:  fmt.Sprintf("Missing dolt_ignore'd tables: %v (will be recreated on next bd command)", missingIgnoredTables),
+			Detail:   "dolt_ignore'd tables live in the working set and must be recreated each server session",
 			Fix:      "Run any bd command to trigger automatic recreation, or restart the Dolt server",
 			Category: CategoryCore,
 		}
@@ -314,7 +323,7 @@ func checkSchemaWithDB(conn *doltConn) DoctorCheck {
 // This is the standalone entry point; RunDoltHealthChecks is preferred
 // for coordinated access.
 func CheckDoltSchema(path string) DoctorCheck {
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	beadsDir := ResolveBeadsDirForRepo(path)
 
 	// Only run for Dolt backend
 	if !IsDoltBackend(beadsDir) {
@@ -369,7 +378,7 @@ func checkIssueCountWithDB(conn *doltConn) DoctorCheck {
 // This is the standalone entry point; RunDoltHealthChecks is preferred
 // for coordinated access.
 func CheckDoltIssueCount(path string) DoctorCheck {
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	beadsDir := ResolveBeadsDirForRepo(path)
 
 	// Only run for Dolt backend
 	if !IsDoltBackend(beadsDir) {
@@ -396,10 +405,20 @@ func CheckDoltIssueCount(path string) DoctorCheck {
 	return checkIssueCountWithDB(conn)
 }
 
-// isWispTable returns true if the table name refers to a wisp (ephemeral) table.
-// Wisp tables are expected to have uncommitted changes since they are excluded
+// isIgnoredTable returns true if the table name refers to a dolt_ignore'd table.
+// These tables are expected to have uncommitted changes since they are excluded
 // from Dolt version tracking via dolt_ignore. Reporting them as uncommitted
 // produces self-fulfilling warnings that can never be cleared.
+func isIgnoredTable(tableName string) bool {
+	switch tableName {
+	case "wisps", "local_metadata", "repo_mtimes":
+		return true
+	}
+	return strings.HasPrefix(tableName, "wisp_")
+}
+
+// isWispTable returns true if the table name refers to a wisp (ephemeral) table.
+// Deprecated: use isIgnoredTable for broader coverage.
 func isWispTable(tableName string) bool {
 	return tableName == "wisps" || strings.HasPrefix(tableName, "wisp_")
 }
@@ -430,9 +449,9 @@ func checkStatusWithDB(conn *doltConn) DoctorCheck {
 		if err := rows.Scan(&tableName, &staged, &status); err != nil {
 			continue
 		}
-		// Skip wisp tables — they are ephemeral and expected to have
-		// uncommitted changes (covered by dolt_ignore).
-		if isWispTable(tableName) {
+		// Skip dolt_ignore'd tables — they are ephemeral and expected to have
+		// uncommitted changes.
+		if isIgnoredTable(tableName) {
 			continue
 		}
 		stageMark := ""

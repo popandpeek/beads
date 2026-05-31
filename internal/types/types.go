@@ -40,6 +40,7 @@ type Issue struct {
 	CreatedAt       time.Time  `json:"created_at"`
 	CreatedBy       string     `json:"created_by,omitempty"` // Who created this issue (GH#748)
 	UpdatedAt       time.Time  `json:"updated_at"`
+	StartedAt       *time.Time `json:"started_at,omitempty"` // When this issue transitioned to in_progress (GH#2796)
 	ClosedAt        *time.Time `json:"closed_at,omitempty"`
 	CloseReason     string     `json:"close_reason,omitempty"`      // Reason provided when closing
 	ClosedBySession string     `json:"closed_by_session,omitempty"` // Claude Code session that closed this issue
@@ -528,6 +529,7 @@ const (
 	TypeDecision  IssueType = "decision"
 	TypeMessage   IssueType = "message"
 	TypeMolecule  IssueType = "molecule"  // Molecule type for swarm coordination (internal use)
+	TypeGate      IssueType = "gate"      // Gate type for async coordination (bd gate, formula gates)
 	TypeSpike     IssueType = "spike"     // Timeboxed investigation to reduce uncertainty
 	TypeStory     IssueType = "story"     // User story describing a feature from the user's perspective
 	TypeMilestone IssueType = "milestone" // Marks completion of a set of related issues (no work itself)
@@ -539,19 +541,22 @@ const (
 // ValidateWithCustom and treated as built-in for hydration trust (GH#1356).
 const TypeEvent IssueType = "event"
 
-// Note: Orchestrator types (molecule, gate, convoy, merge-request, slot, agent, role, rig)
+// Note: Most orchestrator types (convoy, merge-request, slot, agent, role, rig)
 // were removed from beads core. They are now purely custom types with no built-in constants.
-// Use string literals like types.IssueType("molecule") if needed, and configure types.custom.
-// (event was also an orchestrator type but was promoted to a built-in internal type above.)
+// Use string literals like types.IssueType("convoy") if needed, and configure types.custom.
+// molecule, gate, and event were re-promoted to built-in because bd commands rely on them:
+//   - molecule: bd mol pour/wisp/bond (swarm coordination)
+//   - gate: bd gate create/check/resolve, formula gate steps (GH#3213)
+//   - event: set-state audit trail beads (GH#1356)
 // (message was re-promoted to built-in for inter-agent communication — GH#1347.)
 
 // IsValid checks if the issue type is a core work type.
 // Core work types (bug, feature, task, epic, chore, decision, message, spike, story, milestone)
-// and molecule type are built-in. Other types require types.custom configuration.
+// and internal types (molecule, gate) are built-in. Other types require types.custom configuration.
 func (t IssueType) IsValid() bool {
 	switch t {
 	case TypeBug, TypeFeature, TypeTask, TypeEpic, TypeChore, TypeDecision, TypeMessage, TypeMolecule,
-		TypeSpike, TypeStory, TypeMilestone:
+		TypeGate, TypeSpike, TypeStory, TypeMilestone:
 		return true
 	}
 	return false
@@ -754,6 +759,13 @@ type IssueDetails struct {
 	Comments     []*Comment                     `json:"comments,omitempty"`
 	Parent       *string                        `json:"parent,omitempty"`
 
+	// Cardinality fields — emitted by default (count-only mode).
+	// Slice fields (Dependents, Comments) are nil when count-only is active.
+	// Use --include-dependents / --include-comments to populate the slices.
+	DependentCount  *int64 `json:"dependent_count,omitempty"`
+	DependencyCount *int64 `json:"dependency_count,omitempty"`
+	CommentCount    *int64 `json:"comment_count,omitempty"`
+
 	// Epic progress fields (populated only for issue_type=epic with children)
 	EpicTotalChildren  *int  `json:"epic_total_children,omitempty"`
 	EpicClosedChildren *int  `json:"epic_closed_children,omitempty"`
@@ -806,15 +818,24 @@ func (d DependencyType) IsValid() bool {
 	return len(d) > 0 && len(d) <= 50
 }
 
+// WellKnownDependencyTypes returns the built-in dependency types accepted by
+// user-facing commands that intentionally reject custom dependency types.
+func WellKnownDependencyTypes() []DependencyType {
+	return []DependencyType{
+		DepBlocks, DepParentChild, DepConditionalBlocks, DepWaitsFor, DepRelated, DepDiscoveredFrom,
+		DepRepliesTo, DepRelatesTo, DepDuplicates, DepSupersedes,
+		DepAuthoredBy, DepAssignedTo, DepApprovedBy, DepAttests, DepTracks,
+		DepUntil, DepCausedBy, DepValidates, DepDelegatedFrom,
+	}
+}
+
 // IsWellKnown checks if the dependency type is a well-known constant.
 // Returns false for custom/user-defined types (which are still valid).
 func (d DependencyType) IsWellKnown() bool {
-	switch d {
-	case DepBlocks, DepParentChild, DepConditionalBlocks, DepWaitsFor, DepRelated, DepDiscoveredFrom,
-		DepRepliesTo, DepRelatesTo, DepDuplicates, DepSupersedes,
-		DepAuthoredBy, DepAssignedTo, DepApprovedBy, DepAttests, DepTracks,
-		DepUntil, DepCausedBy, DepValidates, DepDelegatedFrom:
-		return true
+	for _, wellKnown := range WellKnownDependencyTypes() {
+		if d == wellKnown {
+			return true
+		}
 	}
 	return false
 }
@@ -823,6 +844,13 @@ func (d DependencyType) IsWellKnown() bool {
 // Only blocking types affect the ready work calculation.
 func (d DependencyType) AffectsReadyWork() bool {
 	return d == DepBlocks || d == DepParentChild || d == DepConditionalBlocks || d == DepWaitsFor
+}
+
+// IsBlockingEdge returns true if this dependency type represents a hard blocker.
+// Unlike AffectsReadyWork, this excludes parent-child (structural, not blocking).
+// Used by dep tree rendering to decide whether the [BLOCKED] badge applies.
+func (d DependencyType) IsBlockingEdge() bool {
+	return d == DepBlocks || d == DepConditionalBlocks || d == DepWaitsFor
 }
 
 // WaitsForMeta holds metadata for waits-for dependencies (fanout gates).
@@ -921,6 +949,33 @@ type Comment struct {
 	Author    string    `json:"author"`
 	Text      string    `json:"text"`
 	CreatedAt time.Time `json:"created_at"`
+}
+
+// UnmarshalJSON handles backward compatibility for Comment.
+// Pre-v1.0 exported Comment.ID as int64; current schema uses string.
+func (c *Comment) UnmarshalJSON(data []byte) error {
+	type commentAlias Comment // avoid recursion
+	var raw struct {
+		commentAlias
+		RawID json.RawMessage `json:"id"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*c = Comment(raw.commentAlias)
+	if len(raw.RawID) > 0 {
+		// try string first, fall back to number
+		var s string
+		if err := json.Unmarshal(raw.RawID, &s); err == nil {
+			c.ID = s
+		} else {
+			var n json.Number
+			if err := json.Unmarshal(raw.RawID, &n); err == nil {
+				c.ID = n.String()
+			}
+		}
+	}
+	return nil
 }
 
 // Event represents an audit trail entry
@@ -1095,9 +1150,10 @@ func BuildReadyExplanation(
 // TreeNode represents a node in a dependency tree
 type TreeNode struct {
 	Issue
-	Depth     int    `json:"depth"`
-	ParentID  string `json:"parent_id"`
-	Truncated bool   `json:"truncated"`
+	Depth          int            `json:"depth"`
+	ParentID       string         `json:"parent_id"`
+	EdgeFromParent DependencyType `json:"edge_from_parent,omitempty"`
+	Truncated      bool           `json:"truncated"`
 }
 
 // MoleculeProgressStats provides efficient progress info for large molecules.
@@ -1137,20 +1193,21 @@ type Statistics struct {
 
 // IssueFilter is used to filter issue queries
 type IssueFilter struct {
-	Status       *Status
-	Statuses     []Status // Multiple status OR filter (from comma-separated --status)
-	Priority     *int
-	IssueType    *IssueType
-	Assignee     *string
-	Labels       []string // AND semantics: issue must have ALL these labels
-	LabelsAny    []string // OR semantics: issue must have AT LEAST ONE of these labels
-	LabelPattern string   // Glob pattern for label matching (e.g., "tech-*")
-	LabelRegex   string   // Regex pattern for label matching (e.g., "tech-(debt|legacy)")
-	TitleSearch  string
-	IDs          []string // Filter by specific issue IDs
-	IDPrefix     string   // Filter by ID prefix (e.g., "bd-" to match "bd-abc123")
-	SpecIDPrefix string   // Filter by spec_id prefix
-	Limit        int
+	Status        *Status
+	Statuses      []Status // Multiple status OR filter (from comma-separated --status)
+	Priority      *int
+	IssueType     *IssueType
+	Assignee      *string
+	Labels        []string // AND semantics: issue must have ALL these labels
+	LabelsAny     []string // OR semantics: issue must have AT LEAST ONE of these labels
+	ExcludeLabels []string // Exclusion: issue must NOT have ANY of these labels
+	LabelPattern  string   // Glob pattern for label matching (e.g., "tech-*")
+	LabelRegex    string   // Regex pattern for label matching (e.g., "tech-(debt|legacy)")
+	TitleSearch   string
+	IDs           []string // Filter by specific issue IDs
+	IDPrefix      string   // Filter by ID prefix (e.g., "bd-" to match "bd-abc123")
+	SpecIDPrefix  string   // Filter by spec_id prefix
+	Limit         int
 
 	// Pattern matching
 	TitleContains       string
@@ -1165,6 +1222,8 @@ type IssueFilter struct {
 	UpdatedBefore *time.Time
 	ClosedAfter   *time.Time
 	ClosedBefore  *time.Time
+	StartedAfter  *time.Time
+	StartedBefore *time.Time
 
 	// Empty/null checks
 	EmptyDescription bool
@@ -1204,7 +1263,7 @@ type IssueFilter struct {
 	ExcludeTypes []IssueType // Exclude issues with these types
 
 	// Time-based scheduling filters (GH#820)
-	Deferred    bool       // Filter issues with defer_until set (any value)
+	Deferred    bool       // Filter issues that are scheduled later: defer_until set OR status is deferred
 	DeferAfter  *time.Time // Filter issues with defer_until > this time
 	DeferBefore *time.Time // Filter issues with defer_until < this time
 	DueAfter    *time.Time // Filter issues with due_at > this time
@@ -1218,6 +1277,15 @@ type IssueFilter struct {
 	// Hydration options — control which relational data is populated on returned issues.
 	// Labels are always hydrated. Dependencies are not by default (for performance).
 	IncludeDependencies bool // When true, populate Issue.Dependencies with []*Dependency records
+
+	// SkipLabels suppresses label hydration. When true, the labels JOIN is
+	// skipped and Issue.Labels is left nil (callers MUST treat as empty).
+	// Opt-in performance flag for the bd list --skip-labels code path.
+	SkipLabels bool
+
+	// Performance escape hatches
+	SkipWisps  bool // Q2: skip wisps table merge entirely (for callers that never return ephemeral results)
+	NoIDShrink bool // Q3: force Pattern A (full 47-col scan) even when Limit > 0
 }
 
 // SortPolicy determines how ready work is ordered
@@ -1250,17 +1318,18 @@ func (s SortPolicy) IsValid() bool {
 
 // WorkFilter is used to filter ready work queries
 type WorkFilter struct {
-	Status       Status
-	Type         string // Filter by issue type (task, bug, feature, epic, merge-request, etc.)
-	Priority     *int
-	Assignee     *string
-	Unassigned   bool     // Filter for issues with no assignee
-	Labels       []string // AND semantics: issue must have ALL these labels
-	LabelsAny    []string // OR semantics: issue must have AT LEAST ONE of these labels
-	LabelPattern string   // Glob pattern for label matching (e.g., "tech-*")
-	LabelRegex   string   // Regex pattern for label matching (e.g., "tech-(debt|legacy)")
-	Limit        int
-	SortPolicy   SortPolicy
+	Status        Status
+	Type          string // Filter by issue type (task, bug, feature, epic, merge-request, etc.)
+	Priority      *int
+	Assignee      *string
+	Unassigned    bool     // Filter for issues with no assignee
+	Labels        []string // AND semantics: issue must have ALL these labels
+	LabelsAny     []string // OR semantics: issue must have AT LEAST ONE of these labels
+	ExcludeLabels []string // Exclusion: issue must NOT have ANY of these labels
+	LabelPattern  string   // Glob pattern for label matching (e.g., "tech-*")
+	LabelRegex    string   // Regex pattern for label matching (e.g., "tech-(debt|legacy)")
+	Limit         int
+	SortPolicy    SortPolicy
 
 	// Parent filtering: filter to descendants of a bead/epic (recursive)
 	ParentID *string // Show all descendants of this issue
@@ -1278,8 +1347,9 @@ type WorkFilter struct {
 	IncludeDeferred bool // If true, include issues with future defer_until timestamps
 
 	// Ephemeral issue filtering
-	// By default, GetReadyWork excludes ephemeral issues (wisps).
-	// Set to true to include them (e.g., for merge-request processing).
+	// By default, GetReadyWork excludes ephemeral wisps but includes
+	// no-history wisps because they are durable work items without Dolt history.
+	// Set to true to include ephemeral wisps too (e.g., for merge-request processing).
 	IncludeEphemeral bool
 
 	// Type exclusion: exclude issues with these types from results.
@@ -1342,6 +1412,24 @@ type BondRef struct {
 	SourceID  string `json:"source_id"`            // Source proto or molecule ID
 	BondType  string `json:"bond_type"`            // sequential, parallel, conditional
 	BondPoint string `json:"bond_point,omitempty"` // Attachment site (issue ID or empty for root)
+}
+
+// UnmarshalJSON handles backward compatibility for BondRef.
+// Pre-v0.63 used "proto_id" instead of "source_id".
+func (b *BondRef) UnmarshalJSON(data []byte) error {
+	type bondAlias BondRef // avoid recursion
+	var raw struct {
+		bondAlias
+		ProtoID string `json:"proto_id"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*b = BondRef(raw.bondAlias)
+	if b.SourceID == "" && raw.ProtoID != "" {
+		b.SourceID = raw.ProtoID
+	}
+	return nil
 }
 
 // Bond type constants for compound molecules

@@ -64,14 +64,37 @@ function downloadFile(url, dest) {
       if (response.statusCode === 301 || response.statusCode === 302) {
         const redirectUrl = response.headers.location;
         console.log(`Following redirect to: ${redirectUrl}`);
-        downloadFile(redirectUrl, dest).then(resolve).catch(reject);
+        response.destroy();
+        request.destroy();
+        file.close((closeErr) => {
+          if (closeErr) {
+            fs.unlink(dest, () => {});
+            reject(closeErr);
+            return;
+          }
+          fs.unlink(dest, () => {});
+          downloadFile(redirectUrl, dest).then(resolve).catch(reject);
+        });
         return;
       }
 
       if (response.statusCode !== 200) {
-        reject(new Error(`Failed to download: HTTP ${response.statusCode}`));
+        const error = new Error(`Failed to download: HTTP ${response.statusCode}`);
+        response.destroy();
+        request.destroy();
+        file.close(() => {
+          fs.unlink(dest, () => {});
+          reject(error);
+        });
         return;
       }
+
+      response.on('error', (err) => {
+        file.close(() => {
+          fs.unlink(dest, () => {});
+          reject(err);
+        });
+      });
 
       response.pipe(file);
 
@@ -80,7 +103,10 @@ function downloadFile(url, dest) {
         // This is critical on Windows where the file may still be locked
         file.close((err) => {
           if (err) reject(err);
-          else resolve();
+          else {
+            response.destroy();
+            resolve();
+          }
         });
       });
     });
@@ -137,7 +163,7 @@ async function waitForFileAccess(filePath, timeoutMs = 30000) {
 
   while (Date.now() - startTime < timeoutMs) {
     try {
-      const fd = fs.openSync(filePath, 'r');
+      const fd = fs.openSync(filePath, 'r+');
       fs.closeSync(fd);
       return; // File is accessible
     } catch (err) {
@@ -234,11 +260,11 @@ async function install() {
     }
 
     // Construct download URL
-    // Format: https://github.com/steveyegge/beads/releases/download/v0.21.5/beads_0.21.5_darwin_amd64.tar.gz
+    // Format: https://github.com/gastownhall/beads/releases/download/v0.21.5/beads_0.21.5_darwin_amd64.tar.gz
     const releaseVersion = VERSION;
     const archiveExt = platformName === 'windows' ? 'zip' : 'tar.gz';
     const archiveName = `beads_${releaseVersion}_${platformName}_${archName}.${archiveExt}`;
-    const downloadUrl = `https://github.com/steveyegge/beads/releases/download/v${releaseVersion}/${archiveName}`;
+    const downloadUrl = `https://github.com/gastownhall/beads/releases/download/v${releaseVersion}/${archiveName}`;
     const archivePath = path.join(binDir, archiveName);
 
     // Download the archive
@@ -273,9 +299,9 @@ async function install() {
     console.error(`Error installing bd: ${err.message}`);
     console.error('');
     console.error('Installation failed. You can try:');
-    console.error('1. Installing manually from: https://github.com/steveyegge/beads/releases');
-    console.error('2. Using the install script: curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash');
-    console.error('3. Opening an issue: https://github.com/steveyegge/beads/issues');
+    console.error('1. Installing manually from: https://github.com/gastownhall/beads/releases');
+    console.error('2. Using the install script: curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash');
+    console.error('3. Opening an issue: https://github.com/gastownhall/beads/issues');
     process.exit(1);
   }
 }

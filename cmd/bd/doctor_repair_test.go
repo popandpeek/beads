@@ -10,6 +10,11 @@ import (
 
 func buildBDForTest(t *testing.T) string {
 	t.Helper()
+	if prebuilt, err := findPrebuiltBDBinary(); err != nil {
+		t.Fatal(err)
+	} else if prebuilt != "" {
+		return prebuilt
+	}
 	exeName := "bd"
 	if runtime.GOOS == "windows" {
 		exeName = "bd.exe"
@@ -17,7 +22,7 @@ func buildBDForTest(t *testing.T) string {
 
 	binDir := t.TempDir()
 	exe := filepath.Join(binDir, exeName)
-	cmd := exec.Command("go", "build", "-o", exe, ".")
+	cmd := exec.Command("go", "build", "-tags", "gms_pure_go", "-o", exe, ".")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("go build failed: %v\n%s", err, string(out))

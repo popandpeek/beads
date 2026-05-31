@@ -196,12 +196,13 @@ func TestValidateKVKey(t *testing.T) {
 		{"empty key", "", true, "cannot be empty"},
 		{"whitespace only", "   ", true, "cannot be only whitespace"},
 		{"kv prefix", "kv.nested", true, "cannot start with 'kv.'"},
-		{"sync prefix", "sync.git-remote", true, "reserved prefix"},
+		{"sync prefix", "sync.remote", true, "reserved prefix"},
 		{"conflict prefix", "conflict.strategy", true, "reserved prefix"},
 		{"federation prefix", "federation.remote", true, "reserved prefix"},
 		{"jira prefix", "jira.url", true, "reserved prefix"},
 		{"linear prefix", "linear.key", true, "reserved prefix"},
 		{"export prefix", "export.path", true, "reserved prefix"},
+		{"import prefix", "import.path", true, "reserved prefix"},
 	}
 
 	for _, tc := range testCases {

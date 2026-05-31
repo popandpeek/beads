@@ -14,16 +14,16 @@ func TestInitGuardServerMessage(t *testing.T) {
 		host           string
 		port           int
 		prefix         string
-		syncGitRemote  string
+		syncRemote     string
 		wantContains   []string
 		wantNotContain []string
 	}{
-		"DB missing, no sync.git-remote configured (FR-010, FR-011)": {
-			dbName:        "acf_beads",
-			host:          "127.0.0.1",
-			port:          3309,
-			prefix:        "acf",
-			syncGitRemote: "",
+		"DB missing, no sync.remote configured (FR-010, FR-011)": {
+			dbName:     "acf_beads",
+			host:       "127.0.0.1",
+			port:       3309,
+			prefix:     "acf",
+			syncRemote: "",
 			wantContains: []string{
 				`"acf_beads"`,
 				"127.0.0.1:3309",
@@ -31,23 +31,23 @@ func TestInitGuardServerMessage(t *testing.T) {
 				"bd doctor",
 				"bd dolt status",
 				"bd bootstrap",
-				"set sync.git-remote",
+				"set sync.remote",
 				".beads/config.yaml",
 				"Aborting",
 				"--force destroys ALL existing issues",
 			},
 			wantNotContain: []string{
-				"sync.git-remote is configured",
+				"sync.remote is configured",
 				// GH#2363: must NOT suggest --force as the primary action
 				"bd init --force --prefix",
 			},
 		},
-		"DB missing, sync.git-remote IS configured (FR-010, FR-011)": {
-			dbName:        "beads_kc",
-			host:          "192.168.1.50",
-			port:          3307,
-			prefix:        "kc",
-			syncGitRemote: "https://doltremoteapi.dolthub.com/myorg/beads",
+		"DB missing, sync.remote IS configured (FR-010, FR-011)": {
+			dbName:     "beads_kc",
+			host:       "192.168.1.50",
+			port:       3307,
+			prefix:     "kc",
+			syncRemote: "https://doltremoteapi.dolthub.com/myorg/beads",
 			wantContains: []string{
 				`"beads_kc"`,
 				"192.168.1.50:3307",
@@ -55,12 +55,12 @@ func TestInitGuardServerMessage(t *testing.T) {
 				"bd doctor",
 				"bd dolt status",
 				"bd bootstrap",
-				"sync.git-remote is configured",
+				"sync.remote is configured",
 				"https://doltremoteapi.dolthub.com/myorg/beads",
 				"--force destroys ALL existing issues",
 			},
 			wantNotContain: []string{
-				"set sync.git-remote",
+				"set sync.remote",
 				// GH#2363: must NOT suggest --force as the primary action
 				"bd init --force --prefix",
 				"bd init --force to bootstrap",
@@ -70,7 +70,7 @@ func TestInitGuardServerMessage(t *testing.T) {
 
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
-			err := initGuardServerMessage(tt.dbName, tt.host, tt.port, tt.prefix, tt.syncGitRemote)
+			err := initGuardServerMessage(tt.dbName, tt.host, tt.port, tt.prefix, tt.syncRemote)
 			if err == nil {
 				t.Fatal("expected non-nil error")
 			}
@@ -131,7 +131,7 @@ func TestInitGuardDBCheck_ServerUnreachable(t *testing.T) {
 	// FR-030: When server is unreachable, should return Reachable=false
 	// so caller falls through to existing error path without panic.
 
-	result := checkDatabaseOnServer("127.0.0.1", 1, "root", "", "nonexistent_db")
+	result := checkDatabaseOnServer("127.0.0.1", 1, "root", "", "nonexistent_db", false)
 	if result.Reachable {
 		t.Fatal("expected Reachable=false for connection refused")
 	}
@@ -217,6 +217,10 @@ func TestInitGuard_FreshCloneWithMetadataJSON(t *testing.T) {
 		if err != nil && !strings.Contains(err.Error(), "already initialized") {
 			t.Errorf("expected 'already initialized' message, got: %v", err)
 		}
+		// GH#3684: must suggest --reinit-local, not deprecated --force
+		if err != nil && strings.Contains(err.Error(), "init --force") {
+			t.Errorf("message must NOT suggest deprecated --force, got:\n%s", err)
+		}
 	})
 
 	t.Run("embedded_mode_no_embeddeddolt_dir_allows_init", func(t *testing.T) {
@@ -277,6 +281,80 @@ func TestInitGuard_FreshCloneWithMetadataJSON(t *testing.T) {
 		if err != nil && !strings.Contains(err.Error(), "already initialized") {
 			t.Errorf("expected 'already initialized' message, got: %v", err)
 		}
+		// GH#3684: must suggest --reinit-local, not deprecated --force
+		if err != nil && strings.Contains(err.Error(), "init --force") {
+			t.Errorf("message must NOT suggest deprecated --force, got:\n%s", err)
+		}
+	})
+
+	t.Run("embedded_metadata_ignores_ambient_shared_server_mode", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+
+		tmpDir := t.TempDir()
+		beadsDir := filepath.Join(tmpDir, ".beads")
+		if err := os.MkdirAll(beadsDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		metadata := map[string]interface{}{
+			"database":  "dolt",
+			"backend":   "dolt",
+			"dolt_mode": "embedded",
+		}
+		data, _ := json.Marshal(metadata)
+		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), data, 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		dbDir := filepath.Join(beadsDir, "embeddeddolt", "beads", ".dolt")
+		if err := os.MkdirAll(dbDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		err := checkExistingBeadsDataAt(beadsDir, "test")
+		if err == nil {
+			t.Error("existing embedded database should still block init when shared server mode is enabled elsewhere")
+		}
+		if err != nil && !strings.Contains(err.Error(), "already initialized") {
+			t.Errorf("expected 'already initialized' message, got: %v", err)
+		}
+		// GH#3684: must suggest --reinit-local, not deprecated --force
+		if err != nil && strings.Contains(err.Error(), "init --force") {
+			t.Errorf("message must NOT suggest deprecated --force, got:\n%s", err)
+		}
+	})
+
+	t.Run("embedded_metadata_ignores_ambient_shared_server_mode", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+
+		tmpDir := t.TempDir()
+		beadsDir := filepath.Join(tmpDir, ".beads")
+		if err := os.MkdirAll(beadsDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		metadata := map[string]interface{}{
+			"database":  "dolt",
+			"backend":   "dolt",
+			"dolt_mode": "embedded",
+		}
+		data, _ := json.Marshal(metadata)
+		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), data, 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		dbDir := filepath.Join(beadsDir, "embeddeddolt", "beads", ".dolt")
+		if err := os.MkdirAll(dbDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		err := checkExistingBeadsDataAt(beadsDir, "test")
+		if err == nil {
+			t.Error("existing embedded database should still block init when shared server mode is enabled elsewhere")
+		}
+		if err != nil && !strings.Contains(err.Error(), "already initialized") {
+			t.Errorf("expected 'already initialized' message, got: %v", err)
+		}
 	})
 
 	t.Run("no_metadata_json_allows_init", func(t *testing.T) {
@@ -308,6 +386,69 @@ func TestInitGuardServerMessage_NoForceAsAction(t *testing.T) {
 	if strings.Contains(msg, "bd init --force to") {
 		t.Errorf("message must NOT suggest 'bd init --force to ...' as an action:\n%s", msg)
 	}
+}
+
+// GH#3684: Regression — init "already initialized" messages must suggest
+// --reinit-local (not the deprecated --force) for the reinit path.
+func TestCheckExistingBeadsData_SuggestsReinitLocal(t *testing.T) {
+	t.Run("embedded_dolt", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		beadsDir := filepath.Join(tmpDir, ".beads")
+
+		// Write metadata.json with embedded dolt mode
+		if err := os.MkdirAll(beadsDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		metadata := map[string]interface{}{
+			"database": "dolt", "backend": "dolt", "dolt_mode": "embedded",
+		}
+		data, _ := json.Marshal(metadata)
+		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), data, 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		// Create embeddeddolt/<db>/.dolt/ to simulate existing DB
+		if err := os.MkdirAll(filepath.Join(beadsDir, "embeddeddolt", "beads", ".dolt"), 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		err := checkExistingBeadsDataAt(beadsDir, "test")
+		if err == nil {
+			t.Fatal("expected error for existing database")
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, "--reinit-local") {
+			t.Errorf("message must suggest --reinit-local, got:\n%s", msg)
+		}
+		if strings.Contains(msg, "init --force") {
+			t.Errorf("message must NOT suggest deprecated --force, got:\n%s", msg)
+		}
+	})
+
+	t.Run("sqlite_db_file", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		beadsDir := filepath.Join(tmpDir, ".beads")
+		if err := os.MkdirAll(beadsDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		// Create a fake beads.db file (no metadata.json → falls through to SQLite check)
+		if err := os.WriteFile(filepath.Join(beadsDir, "beads.db"), []byte("fake"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		err := checkExistingBeadsDataAt(beadsDir, "test")
+		if err == nil {
+			t.Fatal("expected error for existing database file")
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, "--reinit-local") {
+			t.Errorf("message must suggest --reinit-local, got:\n%s", msg)
+		}
+		if strings.Contains(msg, "init --force") {
+			t.Errorf("message must NOT suggest deprecated --force, got:\n%s", msg)
+		}
+	})
 }
 
 // GH#2338, GH#2327: Regression — error messages must always include enough

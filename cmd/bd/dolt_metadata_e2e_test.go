@@ -14,9 +14,6 @@ import (
 // metadata that bd doctor can validate without warnings.
 // Covers FR-018 (e2e init->doctor roundtrip).
 func TestE2E_InitDoltMetadataRoundtrip(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow integration test in short mode")
-	}
 	if runtime.GOOS == "windows" {
 		t.Skip("dolt metadata e2e test not supported on windows")
 	}
@@ -77,9 +74,6 @@ func TestE2E_InitDoltMetadataRoundtrip(t *testing.T) {
 // reports a clean state.
 // Covers FR-019 (e2e doctor fix cycle).
 func TestE2E_DoctorFixMetadataRoundtrip(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow integration test in short mode")
-	}
 	if runtime.GOOS == "windows" {
 		t.Skip("dolt metadata e2e test not supported on windows")
 	}
@@ -112,8 +106,9 @@ func TestE2E_DoctorFixMetadataRoundtrip(t *testing.T) {
 	}
 
 	// Delete metadata to simulate a pre-Phase-1 database
+	// bd_version is now in local_metadata (dolt-ignored), repo_id/clone_id remain in metadata
 	sqlOut, sqlErr := runBDExecAllowErrorWithEnv(t, tmpDir, env, "sql",
-		"DELETE FROM metadata WHERE key IN ('bd_version', 'repo_id', 'clone_id')")
+		"DELETE FROM local_metadata WHERE `key` = 'bd_version'; DELETE FROM metadata WHERE `key` IN ('repo_id', 'clone_id')")
 	if sqlErr != nil {
 		t.Fatalf("bd sql DELETE failed: %v\n%s", sqlErr, sqlOut)
 	}
@@ -149,9 +144,6 @@ func TestE2E_DoctorFixMetadataRoundtrip(t *testing.T) {
 // the case where bd_version is already set but identity fields are missing.
 // Covers SC-005 (migrate sets repo_id and clone_id).
 func TestE2E_MigrateDoltMetadata(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow integration test in short mode")
-	}
 	if runtime.GOOS == "windows" {
 		t.Skip("dolt metadata e2e test not supported on windows")
 	}

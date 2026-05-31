@@ -5,12 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -18,7 +19,7 @@ import (
 // Silent on success, prints a hint if issues detected.
 // Respects hints.doctor config setting.
 func runCheckHealth(path string) {
-	beadsDir := filepath.Join(path, ".beads")
+	beadsDir := doctor.ResolveBeadsDirForRepo(path)
 
 	// Check if .beads/ exists
 	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
@@ -52,8 +53,15 @@ func runCheckHealth(path string) {
 
 	var issues []string
 
-	dsn := fmt.Sprintf("%s@tcp(%s:%d)/%s?timeout=2s",
-		cfg.GetDoltServerUser(), host, port, database)
+	dsn := doltutil.ServerDSN{
+		Host:     host,
+		Port:     port,
+		User:     cfg.GetDoltServerUser(),
+		Password: cfg.GetDoltServerPasswordForPort(port),
+		Database: database,
+		Timeout:  2 * time.Second,
+		TLS:      cfg.GetDoltServerTLS(),
+	}.String()
 	db, err := sql.Open("mysql", dsn)
 	if err == nil {
 		defer db.Close()
@@ -221,7 +229,7 @@ func hintsDisabledDB(db *sql.DB) bool {
 // Uses an existing DB connection.
 func checkVersionMismatchDB(db *sql.DB) string {
 	var dbVersion string
-	err := db.QueryRow("SELECT value FROM metadata WHERE `key` = 'bd_version'").Scan(&dbVersion)
+	err := db.QueryRow("SELECT value FROM local_metadata WHERE `key` = 'bd_version'").Scan(&dbVersion)
 	if err != nil {
 		return "" // Can't read version, skip
 	}

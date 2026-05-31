@@ -127,7 +127,7 @@ func CheckDatabaseVersionWithStore(ss *SharedStore, cliVersion string) DoctorChe
 
 func checkDatabaseVersionWithStore(store *dolt.DoltStore, cliVersion string) DoctorCheck {
 	ctx := context.Background()
-	dbVersion, err := store.GetMetadata(ctx, "bd_version")
+	dbVersion, err := store.GetLocalMetadata(ctx, "bd_version")
 	if err != nil {
 		return DoctorCheck{
 			Name:    "Database",
@@ -138,12 +138,13 @@ func checkDatabaseVersionWithStore(store *dolt.DoltStore, cliVersion string) Doc
 		}
 	}
 	if dbVersion == "" {
+		// bd_version is in local_metadata (dolt-ignored), so it's expected to be
+		// empty after a working-set reset. It self-heals on next startup.
 		return DoctorCheck{
 			Name:    "Database",
-			Status:  StatusWarning,
-			Message: "Database missing version metadata",
+			Status:  StatusOK,
+			Message: "bd_version not yet stamped (will self-heal on next startup)",
 			Detail:  "Storage: Dolt",
-			Fix:     "Run 'bd doctor --fix' to repair metadata",
 		}
 	}
 
@@ -280,7 +281,7 @@ func CheckDatabaseIntegrityWithStore(ss *SharedStore) DoctorCheck {
 func checkDatabaseIntegrityWithStore(store *dolt.DoltStore) DoctorCheck {
 	ctx := context.Background()
 	// Minimal checks: metadata + statistics. If these work, the store is at least readable.
-	if _, err := store.GetMetadata(ctx, "bd_version"); err != nil {
+	if _, err := store.GetLocalMetadata(ctx, "bd_version"); err != nil {
 		return DoctorCheck{
 			Name:    "Database Integrity",
 			Status:  StatusError,
@@ -429,7 +430,7 @@ func checkProjectIdentityWithStore(store *dolt.DoltStore, cfg *configfile.Config
 				Status:   StatusError,
 				Message:  fmt.Sprintf("Project ID mismatch: metadata.json=%s, database=%s", cfg.ProjectID, dbID),
 				Detail:   "This may indicate cross-project data leakage (GH#2372)",
-				Fix:      "Run 'bd dolt status' to diagnose. Do NOT run 'bd init'",
+				Fix:      "Run 'bd doctor --fix' or 'bd bootstrap' to reconcile metadata.json with the authoritative database. If unexpected, run 'bd dolt status' first. Do NOT run 'bd init'",
 				Category: CategoryData,
 			}
 		}

@@ -23,11 +23,10 @@ func getDatabasePath(beadsDir string) string {
 // OrphanedDependencies removes dependencies pointing to non-existent issues.
 // If verbose is true, prints each removed dependency; otherwise shows only summary.
 func OrphanedDependencies(path string, verbose bool) error {
-	if err := validateBeadsWorkspace(path); err != nil {
+	beadsDir, err := resolvedWorkspaceBeadsDir(path)
+	if err != nil {
 		return err
 	}
-
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 
 	db, err := openDoltDB(beadsDir)
 	if err != nil {
@@ -37,11 +36,12 @@ func OrphanedDependencies(path string, verbose bool) error {
 	defer db.Close()
 
 	// Find orphaned dependencies (exclude external: cross-rig tracking refs, #1593)
+	//nolint:gosec // G202: fixDependencyUnionSQL returns a fixed internal SELECT fragment.
 	query := `
-		SELECT d.issue_id, d.depends_on_id
-		FROM dependencies d
-		LEFT JOIN issues i ON d.depends_on_id = i.id
-		WHERE i.id IS NULL
+		SELECT d.dep_table, d.issue_id, d.depends_on_id
+		FROM (` + fixDependencyUnionSQL() + `) d
+		WHERE NOT EXISTS (SELECT 1 FROM issues i WHERE i.id = d.depends_on_id)
+		  AND NOT EXISTS (SELECT 1 FROM wisps w WHERE w.id = d.depends_on_id)
 		  AND d.depends_on_id NOT LIKE 'external:%'
 	`
 	rows, err := db.Query(query)
@@ -51,6 +51,7 @@ func OrphanedDependencies(path string, verbose bool) error {
 	defer rows.Close()
 
 	type orphan struct {
+		depTable    string
 		issueID     string
 		dependsOnID string
 	}
@@ -58,7 +59,7 @@ func OrphanedDependencies(path string, verbose bool) error {
 
 	for rows.Next() {
 		var o orphan
-		if err := rows.Scan(&o.issueID, &o.dependsOnID); err == nil {
+		if err := rows.Scan(&o.depTable, &o.issueID, &o.dependsOnID); err == nil {
 			orphans = append(orphans, o)
 		}
 	}
@@ -81,8 +82,16 @@ func OrphanedDependencies(path string, verbose bool) error {
 	}
 	var removed int
 	for _, o := range orphans {
-		_, err := tx.Exec("DELETE FROM dependencies WHERE issue_id = ? AND depends_on_id = ?",
-			o.issueID, o.dependsOnID)
+		var err error
+		switch o.depTable {
+		case "dependencies":
+			_, err = tx.Exec("DELETE FROM dependencies WHERE issue_id = ? AND "+fixDependencyTargetExpr+" = ?", o.issueID, o.dependsOnID)
+		case "wisp_dependencies":
+			_, err = tx.Exec("DELETE FROM wisp_dependencies WHERE issue_id = ? AND "+fixDependencyTargetExpr+" = ?", o.issueID, o.dependsOnID)
+		default:
+			fmt.Printf("  Warning: skipped orphaned dependency from unexpected table %s\n", o.depTable)
+			continue
+		}
 		if err != nil {
 			fmt.Printf("  Warning: failed to remove %s→%s: %v\n", o.issueID, o.dependsOnID, err)
 		} else {
@@ -108,11 +117,10 @@ func OrphanedDependencies(path string, verbose bool) error {
 // Requires explicit opt-in via --fix-child-parent flag since some workflows may use these intentionally.
 // If verbose is true, prints each removed dependency; otherwise shows only summary.
 func ChildParentDependencies(path string, verbose bool) error {
-	if err := validateBeadsWorkspace(path); err != nil {
+	beadsDir, err := resolvedWorkspaceBeadsDir(path)
+	if err != nil {
 		return err
 	}
-
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 
 	db, err := openDoltDB(beadsDir)
 	if err != nil {
@@ -124,9 +132,10 @@ func ChildParentDependencies(path string, verbose bool) error {
 	// Find child→parent BLOCKING dependencies where issue_id starts with depends_on_id + "."
 	// Only matches blocking types (blocks, conditional-blocks, waits-for) that cause deadlock.
 	// Excludes 'parent-child' type which is a legitimate structural hierarchy relationship.
+	//nolint:gosec // G202: fixDependencyUnionSQL returns a fixed internal SELECT fragment.
 	query := `
-		SELECT d.issue_id, d.depends_on_id, d.type
-		FROM dependencies d
+		SELECT d.dep_table, d.issue_id, d.depends_on_id, d.type
+		FROM (` + fixDependencyUnionSQL() + `) d
 		WHERE d.issue_id LIKE CONCAT(d.depends_on_id, '.%')
 		  AND d.type IN ('blocks', 'conditional-blocks', 'waits-for')
 	`
@@ -137,6 +146,7 @@ func ChildParentDependencies(path string, verbose bool) error {
 	defer rows.Close()
 
 	type badDep struct {
+		depTable    string
 		issueID     string
 		dependsOnID string
 		depType     string
@@ -145,7 +155,7 @@ func ChildParentDependencies(path string, verbose bool) error {
 
 	for rows.Next() {
 		var d badDep
-		if err := rows.Scan(&d.issueID, &d.dependsOnID, &d.depType); err == nil {
+		if err := rows.Scan(&d.depTable, &d.issueID, &d.dependsOnID, &d.depType); err == nil {
 			badDeps = append(badDeps, d)
 		}
 	}
@@ -168,8 +178,16 @@ func ChildParentDependencies(path string, verbose bool) error {
 	}
 	var removed int
 	for _, d := range badDeps {
-		_, err := tx.Exec("DELETE FROM dependencies WHERE issue_id = ? AND depends_on_id = ? AND type = ?",
-			d.issueID, d.dependsOnID, d.depType)
+		var err error
+		switch d.depTable {
+		case "dependencies":
+			_, err = tx.Exec("DELETE FROM dependencies WHERE issue_id = ? AND "+fixDependencyTargetExpr+" = ? AND type = ?", d.issueID, d.dependsOnID, d.depType)
+		case "wisp_dependencies":
+			_, err = tx.Exec("DELETE FROM wisp_dependencies WHERE issue_id = ? AND "+fixDependencyTargetExpr+" = ? AND type = ?", d.issueID, d.dependsOnID, d.depType)
+		default:
+			fmt.Printf("  Warning: skipped child→parent dependency from unexpected table %s\n", d.depTable)
+			continue
+		}
 		if err != nil {
 			fmt.Printf("  Warning: failed to remove %s→%s: %v\n", d.issueID, d.dependsOnID, err)
 		} else {

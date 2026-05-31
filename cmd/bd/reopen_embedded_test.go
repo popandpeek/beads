@@ -20,11 +20,11 @@ func bdReopen(t *testing.T, bd, dir string, args ...string) string {
 	cmd := exec.Command(bd, fullArgs...)
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd reopen %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		t.Fatalf("bd reopen %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
-	return string(out)
+	return stdout.String()
 }
 
 func TestEmbeddedReopen(t *testing.T) {
@@ -105,11 +105,11 @@ func TestEmbeddedReopen(t *testing.T) {
 		cmd := exec.Command(bd, "reopen", issue.ID, "--json")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
-		out, err := cmd.CombinedOutput()
+		stdout, stderr, err := runCommandBuffers(t, cmd)
 		if err != nil {
-			t.Fatalf("bd reopen --json failed: %v\n%s", err, out)
+			t.Fatalf("bd reopen --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 		}
-		s := strings.TrimSpace(string(out))
+		s := strings.TrimSpace(stdout.String())
 		start := strings.Index(s, "[")
 		if start < 0 {
 			start = strings.Index(s, "{")
@@ -197,14 +197,27 @@ func TestEmbeddedReopenConcurrent(t *testing.T) {
 	}
 	wg.Wait()
 
+	var successes int
 	for _, r := range results {
 		if r.err != nil {
-			t.Errorf("worker %d failed: %v", r.worker, r.err)
+			if !strings.Contains(r.err.Error(), "one writer at a time") {
+				t.Errorf("worker %d failed: %v", r.worker, r.err)
+			}
+			continue
 		}
+		successes++
 	}
+	if successes == 0 {
+		t.Fatal("all workers failed; expected at least 1 success")
+	}
+	t.Logf("%d/%d workers succeeded (flock contention expected)", successes, numWorkers)
 
-	// Verify all reopened
-	for _, id := range issueIDs {
+	// Verify only successful workers' issues are reopened
+	for _, r := range results {
+		if r.err != nil {
+			continue
+		}
+		id := issueIDs[r.worker]
 		got := bdShow(t, bd, dir, id)
 		if got.Status != types.StatusOpen {
 			t.Errorf("expected %s to be open after reopen, got %s", id, got.Status)

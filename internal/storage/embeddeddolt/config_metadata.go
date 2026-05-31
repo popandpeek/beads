@@ -5,6 +5,7 @@ package embeddeddolt
 import (
 	"context"
 	"database/sql"
+	"fmt"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
@@ -14,7 +15,21 @@ import (
 
 func (s *EmbeddedDoltStore) SetConfig(ctx context.Context, key, value string) error {
 	return s.withConn(ctx, true, func(tx *sql.Tx) error {
-		return issueops.SetConfigInTx(ctx, tx, key, value)
+		if err := issueops.SetConfigInTx(ctx, tx, key, value); err != nil {
+			return err
+		}
+		// Sync normalized tables when config keys change
+		switch key {
+		case "status.custom":
+			if err := issueops.SyncCustomStatusesTable(ctx, tx, value); err != nil {
+				return fmt.Errorf("syncing custom_statuses table: %w", err)
+			}
+		case "types.custom":
+			if err := issueops.SyncCustomTypesTable(ctx, tx, value); err != nil {
+				return fmt.Errorf("syncing custom_types table: %w", err)
+			}
+		}
+		return nil
 	})
 }
 
@@ -52,6 +67,22 @@ func (s *EmbeddedDoltStore) SetMetadata(ctx context.Context, key, value string) 
 	return s.withConn(ctx, true, func(tx *sql.Tx) error {
 		return issueops.SetMetadataInTx(ctx, tx, key, value)
 	})
+}
+
+func (s *EmbeddedDoltStore) SetLocalMetadata(ctx context.Context, key, value string) error {
+	return s.withConn(ctx, true, func(tx *sql.Tx) error {
+		return issueops.SetLocalMetadataInTx(ctx, tx, key, value)
+	})
+}
+
+func (s *EmbeddedDoltStore) GetLocalMetadata(ctx context.Context, key string) (string, error) {
+	var value string
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		value, err = issueops.GetLocalMetadataInTx(ctx, tx, key)
+		return err
+	})
+	return value, err
 }
 
 // GetInfraTypes returns the set of infrastructure types that should be routed

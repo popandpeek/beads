@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -28,6 +29,8 @@ import (
 	"github.com/steveyegge/beads/internal/molecules"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/storage/schema"
+	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/telemetry"
 	"github.com/steveyegge/beads/internal/utils"
 	"go.opentelemetry.io/otel/attribute"
@@ -35,10 +38,12 @@ import (
 )
 
 var (
-	dbPath     string
-	actor      string
-	store      storage.DoltStorage
-	jsonOutput bool
+	changeDir   string
+	dbPath      string
+	actor       string
+	store       storage.DoltStorage
+	uowProvider uow.UnitOfWorkProvider
+	jsonOutput  bool
 
 	// Signal-aware context for graceful cancellation
 	rootCtx    context.Context
@@ -56,17 +61,28 @@ var (
 	previousVersion        = ""    // The last bd version user had (empty = first run or unknown)
 	upgradeAcknowledged    = false // Set to true after showing upgrade notification once per session
 )
+
+type envSnapshotValue struct {
+	value string
+	ok    bool
+}
+
+var changeDirEnvSnapshot map[string]envSnapshotValue
+
 var (
-	sandboxMode     bool
-	serverMode      bool               // True when using external dolt sql-server (dolt_mode=server)
-	readonlyMode    bool               // Read-only mode: block write operations (for worker sandboxes)
-	storeIsReadOnly bool               // Track if store was opened read-only (for staleness checks)
-	lockTimeout     = 30 * time.Second // Dolt open timeout (fixed default)
-	profileEnabled  bool
-	profileFile     *os.File
-	traceFile       *os.File
-	verboseFlag     bool // Enable verbose/debug output
-	quietFlag       bool // Suppress non-essential output
+	sandboxMode       bool
+	globalFlag        bool
+	serverMode        bool
+	proxiedServerMode bool
+	readonlyMode      bool               // Read-only mode: block write operations (for worker sandboxes)
+	storeIsReadOnly   bool               // Track if store was opened read-only (for staleness checks)
+	ignoreSchemaSkew  bool               // Proceed despite forward schema drift
+	lockTimeout       = 30 * time.Second // Dolt open timeout (fixed default)
+	profileEnabled    bool
+	profileFile       *os.File
+	traceFile         *os.File
+	verboseFlag       bool // Enable verbose/debug output
+	quietFlag         bool // Suppress non-essential output
 
 	// Dolt auto-commit policy (flag/config). Values: off | on
 	doltAutoCommit string
@@ -75,6 +91,11 @@ var (
 	// auto-flush. Used to decide whether to auto-commit Dolt after the command completes.
 	// Thread-safe via atomic.Bool to avoid data races in concurrent flush operations.
 	commandDidWrite atomic.Bool
+
+	// commandMayEmptyJSONLExport is set by destructive maintenance commands
+	// after they actually delete rows, allowing post-run auto-export to record
+	// an intentional empty JSONL artifact instead of treating it as ambiguous.
+	commandMayEmptyJSONLExport atomic.Bool
 
 	// commandDidExplicitDoltCommit is set when a command already created a Dolt commit
 	// explicitly (e.g., bd sync in dolt-native mode, hook flows, bd vc commit).
@@ -109,6 +130,7 @@ var readOnlyCommands = map[string]bool{
 	"duplicates": true,
 	"comments":   true, // list comments (not add)
 	"current":    true, // bd sync mode current
+	"ping":       true,
 	"backup":     true, // reads from Dolt, writes only to .beads/backup/
 	"export":     true, // reads from Dolt, writes JSONL to file/stdout
 }
@@ -133,6 +155,55 @@ func loadBeadsEnvFile(beadsDir string) {
 		return
 	}
 	_ = gotenv.Load(envFile)
+}
+
+func logConfigDiscovery(beadsDir, reason string) {
+	metadataPath := filepath.Join(beadsDir, configfile.ConfigFileName)
+	configYAMLPath := filepath.Join(beadsDir, "config.yaml")
+	_, metadataErr := os.Stat(metadataPath)
+	_, yamlErr := os.Stat(configYAMLPath)
+	debug.Logf("Debug: %s at %s -> metadata=%v (%v), config.yaml=%v (%v)\n",
+		reason, beadsDir, metadataErr == nil, metadataErr, yamlErr == nil, yamlErr)
+}
+
+func shouldLogDefaultDoltDatabase(cfg *configfile.Config) bool {
+	return cfg != nil && cfg.DoltDatabase == "" && os.Getenv("BEADS_DOLT_SERVER_DATABASE") == ""
+}
+
+// loadBeadsSelectionEnvFile loads only the selector keys needed for early
+// workspace/database discovery. Unlike loadBeadsEnvFile, this intentionally
+// limits itself to BEADS_DIR / BEADS_DB / BD_DB so caller credentials and
+// runtime knobs do not leak into explicit-target commands before rebinding.
+func loadBeadsSelectionEnvFile(beadsDir string) {
+	if beadsDir == "" {
+		return
+	}
+	envFile := filepath.Join(beadsDir, ".env")
+	pairs, err := gotenv.Read(envFile)
+	if err != nil {
+		return
+	}
+	for _, key := range []string{"BEADS_DIR", "BEADS_DB", "BD_DB"} {
+		if os.Getenv(key) != "" {
+			continue
+		}
+		if value, ok := pairs[key]; ok && strings.TrimSpace(value) != "" {
+			_ = os.Setenv(key, value)
+		}
+	}
+}
+
+// loadSelectionEnvironment loads only the selector keys required to discover
+// the target workspace/database before the store-init path runs. This preserves
+// historical support for .beads/.env files that route commands via BEADS_DB or
+// BEADS_DIR without importing the caller workspace's broader runtime settings.
+func loadSelectionEnvironment() {
+	if os.Getenv("BEADS_DIR") != "" || os.Getenv("BEADS_DB") != "" || os.Getenv("BD_DB") != "" {
+		return
+	}
+	if beadsDir := beads.FindBeadsDir(); beadsDir != "" {
+		loadBeadsSelectionEnvFile(beadsDir)
+	}
 }
 
 // loadEnvironment runs the lightweight, always-needed environment setup that
@@ -176,11 +247,10 @@ func repairSharedServerEmbeddedMismatch(beadsDir string, cfg *configfile.Config)
 	}
 }
 
-// loadServerModeFromConfig loads the storage mode (embedded vs server) from
-// metadata.json so that isEmbeddedMode() returns the correct value. Called
-// for commands that skip full DB init but still need to know the mode.
-func loadServerModeFromConfig() {
-	beadsDir := beads.FindBeadsDir()
+// loadServerModeFromBeadsDir loads the storage mode (embedded vs server vs
+// proxied-server) from the given beads directory's metadata.json so that
+// usesSQLServer() and usesProxiedServer() return the correct values.
+func loadServerModeFromBeadsDir(beadsDir string) {
 	if beadsDir == "" {
 		return
 	}
@@ -189,15 +259,26 @@ func loadServerModeFromConfig() {
 		return
 	}
 	repairSharedServerEmbeddedMismatch(beadsDir, cfg)
+	psm := cfg.IsDoltProxiedServerMode()
 	sm := cfg.IsDoltServerMode()
 	// GH#2946: shared-server override for stale metadata.json (no-db commands)
-	if !sm && doltserver.IsSharedServerMode() {
+	if !sm && !psm && doltserver.IsSharedServerMode() {
 		sm = true
 	}
 	serverMode = sm
+	proxiedServerMode = psm
 	if cmdCtx != nil {
 		cmdCtx.ServerMode = sm
+		cmdCtx.ProxiedServerMode = psm
 	}
+}
+
+// loadServerModeFromConfig loads the storage mode (embedded vs server vs
+// proxied-server) from metadata.json so that usesSQLServer() and
+// usesProxiedServer() return the correct values. Called for commands that
+// skip full DB init but still need to know the mode.
+func loadServerModeFromConfig() {
+	loadServerModeFromBeadsDir(beads.FindBeadsDir())
 }
 
 func preserveRedirectSourceDatabase(beadsDir string) {
@@ -214,19 +295,31 @@ func preserveRedirectSourceDatabase(beadsDir string) {
 	}
 }
 
-func selectedNoDBBeadsDir() string {
-	selectedDBPath := ""
-	if rootCmd.PersistentFlags().Changed("db") && dbPath != "" {
-		selectedDBPath = dbPath
+func selectedNoDBBeadsDir(cmd *cobra.Command) string {
+	if cmd != nil && cmd.Root() != nil && cmd.Root().PersistentFlags().Changed("db") && dbPath != "" {
+		if selectedBeadsDir := resolveCommandBeadsDir(dbPath); selectedBeadsDir != "" {
+			return selectedBeadsDir
+		}
+	} else if cmd != nil && cmd.PersistentFlags().Changed("db") && dbPath != "" {
+		if selectedBeadsDir := resolveCommandBeadsDir(dbPath); selectedBeadsDir != "" {
+			return selectedBeadsDir
+		}
 	} else if envDB := os.Getenv("BEADS_DB"); envDB != "" {
-		selectedDBPath = envDB
+		if selectedBeadsDir := resolveCommandBeadsDir(envDB); selectedBeadsDir != "" {
+			return selectedBeadsDir
+		}
 	} else if envDB := os.Getenv("BD_DB"); envDB != "" {
-		selectedDBPath = envDB
-	} else {
-		selectedDBPath = dbPath
+		if selectedBeadsDir := resolveCommandBeadsDir(envDB); selectedBeadsDir != "" {
+			return selectedBeadsDir
+		}
 	}
-	if selectedDBPath != "" {
-		if selectedBeadsDir := resolveCommandBeadsDir(selectedDBPath); selectedBeadsDir != "" {
+	if dbPath != "" {
+		if selectedBeadsDir := resolveCommandBeadsDir(dbPath); selectedBeadsDir != "" {
+			return selectedBeadsDir
+		}
+	}
+	if os.Getenv("BEADS_DIR") != "" {
+		if selectedBeadsDir := beads.FindBeadsDir(); selectedBeadsDir != "" {
 			return selectedBeadsDir
 		}
 	}
@@ -237,7 +330,7 @@ func isSelectedNoDBCommand(cmd *cobra.Command) bool {
 	if cmd == nil {
 		return false
 	}
-	if cmd.Name() == "context" {
+	if cmd.Name() == "context" || cmd.Name() == "where" {
 		return true
 	}
 	if cmd.Parent() == nil || cmd.Parent().Name() != "dolt" {
@@ -251,15 +344,85 @@ func isSelectedNoDBCommand(cmd *cobra.Command) bool {
 	}
 }
 
-func prepareSelectedNoDBContext(beadsDir string) {
+// configCommandCanRunWithoutStore returns true for config subcommands whose Run
+// path can execute without an opened Dolt store. This lets no-workspace calls
+// fail or degrade in the command itself instead of tripping low-level DB init.
+func configCommandCanRunWithoutStore(cmd *cobra.Command, args []string) bool {
+	if cmd == nil || cmd.Parent() == nil || cmd.Parent().Name() != "config" {
+		return false
+	}
+
+	switch cmd.Name() {
+	case "show", "validate", "drift", "apply":
+		return true
+	case "set", "get", "unset":
+		if len(args) == 0 {
+			return true
+		}
+		key := args[0]
+		return config.IsYamlOnlyKey(key) || key == "beads.role"
+	case "set-many":
+		if len(args) == 0 {
+			return true
+		}
+		for _, arg := range args {
+			key, _, ok := strings.Cut(arg, "=")
+			if !ok || key == "" {
+				return true
+			}
+			if !config.IsYamlOnlyKey(key) && key != "beads.role" {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+func prepareSelectedCommandContext(beadsDir string, loadEnv bool) {
 	if beadsDir == "" {
 		return
 	}
 	_ = os.Setenv("BEADS_DIR", beadsDir)
-	loadBeadsEnvFile(beadsDir)
+	if loadEnv {
+		loadBeadsEnvFile(beadsDir)
+	}
 	preserveRedirectSourceDatabase(beadsDir)
 	if err := config.Initialize(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to reinitialize config for selected beads dir: %v\n", err)
+	}
+	config.CheckBeadsDirPermissions(beadsDir)
+	loadServerModeFromBeadsDir(beadsDir)
+}
+
+func prepareSelectedNoDBContext(beadsDir string) {
+	prepareSelectedCommandContext(beadsDir, true)
+}
+
+// refreshBoundCommandConfig reapplies config-backed defaults after the command
+// context has been rebound to a resolved target beads directory. This keeps
+// explicit flags authoritative while letting rerouted/explicit-db commands use
+// the target repo's config rather than the caller's config.
+func refreshBoundCommandConfig(cmd *cobra.Command) {
+	if cmd == nil {
+		return
+	}
+	root := cmd.Root()
+	if root == nil {
+		root = cmd
+	}
+	if !root.PersistentFlags().Changed("json") && !root.PersistentFlags().Changed("format") {
+		jsonOutput = config.GetBool("json")
+	}
+	if !root.PersistentFlags().Changed("readonly") {
+		readonlyMode = config.GetBool("readonly")
+	}
+	if !root.PersistentFlags().Changed("actor") {
+		actor = config.GetString("actor")
+	}
+	if !root.PersistentFlags().Changed("dolt-auto-commit") {
+		doltAutoCommit = config.GetString("dolt.auto-commit")
 	}
 }
 
@@ -355,17 +518,20 @@ func init() {
 	}
 
 	// Register persistent flags
+	rootCmd.PersistentFlags().StringVarP(&changeDir, "directory", "C", "", "Change to this directory before running the command (like git -C)")
 	rootCmd.PersistentFlags().StringVar(&dbPath, "db", "", "Database path (default: auto-discover .beads/*.db)")
 	rootCmd.PersistentFlags().StringVar(&actor, "actor", "", "Actor name for audit trail (default: $BEADS_ACTOR, git user.name, $USER)")
 	rootCmd.PersistentFlags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
 	rootCmd.PersistentFlags().String("format", "", "Output format (json). Alias for --json")
 	_ = rootCmd.PersistentFlags().MarkHidden("format") // Hidden alias for CLI ergonomics
-	rootCmd.PersistentFlags().BoolVar(&sandboxMode, "sandbox", false, "Sandbox mode: disables auto-sync")
+	rootCmd.PersistentFlags().BoolVar(&sandboxMode, "sandbox", false, "Sandbox mode: disables Dolt auto-push")
 	rootCmd.PersistentFlags().BoolVar(&readonlyMode, "readonly", false, "Read-only mode: block write operations (for worker sandboxes)")
+	rootCmd.PersistentFlags().BoolVar(&globalFlag, "global", false, "Use the global shared-server database (beads_global)")
 	rootCmd.PersistentFlags().StringVar(&doltAutoCommit, "dolt-auto-commit", "", "Dolt auto-commit policy (off|on|batch). 'on': commit after each write. 'batch': defer commits to bd dolt commit; uncommitted changes persist in the working set until then. SIGTERM/SIGHUP flush pending batch commits. Default: off. Override via config key dolt.auto-commit")
 	rootCmd.PersistentFlags().BoolVar(&profileEnabled, "profile", false, "Generate CPU profile for performance analysis")
 	rootCmd.PersistentFlags().BoolVarP(&verboseFlag, "verbose", "v", false, "Enable verbose/debug output")
 	rootCmd.PersistentFlags().BoolVarP(&quietFlag, "quiet", "q", false, "Suppress non-essential output (errors only)")
+	rootCmd.PersistentFlags().BoolVar(&ignoreSchemaSkew, "ignore-schema-skew", false, "Proceed despite forward schema drift (some queries may fail)")
 
 	// Add --version flag to root command (same behavior as version subcommand)
 	rootCmd.Flags().BoolP("version", "V", false, "Print version information")
@@ -387,6 +553,58 @@ func init() {
 	rootCmd.SetHelpFunc(colorizedHelpFunc)
 }
 
+func resolveChangeDirBeadsDir(path string) (string, error) {
+	if strings.TrimSpace(path) == "" {
+		return "", nil
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve -C directory %q: %w", path, err)
+	}
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return "", fmt.Errorf("cannot use -C directory %q: %w", path, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("cannot use -C directory %q: not a directory", path)
+	}
+	beadsDir := beads.FindBeadsDirFrom(absPath)
+	if beadsDir == "" {
+		return "", fmt.Errorf("cannot use -C directory %q: no beads project found", path)
+	}
+	return beadsDir, nil
+}
+
+func applyChangeDirSelection() {
+	if strings.TrimSpace(changeDir) == "" {
+		return
+	}
+	beadsDir, err := resolveChangeDirBeadsDir(changeDir)
+	if err != nil {
+		FatalError("%v", err)
+	}
+	changeDirEnvSnapshot = make(map[string]envSnapshotValue, 3)
+	for _, key := range []string{"BEADS_DIR", "BEADS_DB", "BD_DB"} {
+		value, ok := os.LookupEnv(key)
+		changeDirEnvSnapshot[key] = envSnapshotValue{value: value, ok: ok}
+	}
+	_ = os.Setenv("BEADS_DIR", beadsDir)
+}
+
+func restoreChangeDirSelection() {
+	if changeDirEnvSnapshot == nil {
+		return
+	}
+	for key, snapshot := range changeDirEnvSnapshot {
+		if snapshot.ok {
+			_ = os.Setenv(key, snapshot.value)
+		} else {
+			_ = os.Unsetenv(key)
+		}
+	}
+	changeDirEnvSnapshot = nil
+}
+
 var rootCmd = &cobra.Command{
 	Use:   "bd",
 	Short: "bd - Dependency-aware issue tracker",
@@ -406,6 +624,7 @@ var rootCmd = &cobra.Command{
 
 		// Reset per-command write tracking (used by Dolt auto-commit).
 		commandDidWrite.Store(false)
+		commandMayEmptyJSONLExport.Store(false)
 		commandDidExplicitDoltCommit = false
 		commandDidWriteTipMetadata = false
 		commandTipIDsShown = make(map[string]struct{})
@@ -435,10 +654,14 @@ var rootCmd = &cobra.Command{
 		debug.SetVerbose(verboseFlag)
 		debug.SetQuiet(quietFlag)
 
+		applyChangeDirSelection()
+
 		// Block dangerous env var overrides that could cause data fragmentation (bd-hevyw).
 		if err := checkBlockedEnvVars(); err != nil {
 			FatalError("%v", err)
 		}
+
+		loadSelectionEnvironment()
 
 		// Apply viper configuration if flags weren't explicitly set
 		// Priority: flags > viper (config file + env vars) > defaults
@@ -474,7 +697,8 @@ var rootCmd = &cobra.Command{
 				WasSet bool
 			}{readonlyMode, true}
 		}
-		if !cmd.Root().PersistentFlags().Changed("db") && dbPath == "" {
+		if !cmd.Root().PersistentFlags().Changed("db") && dbPath == "" &&
+			os.Getenv("BEADS_DB") == "" && os.Getenv("BD_DB") == "" && os.Getenv("BEADS_DIR") == "" {
 			dbPath = config.GetString("db")
 		} else if cmd.Root().PersistentFlags().Changed("db") {
 			flagOverrides["db"] = struct {
@@ -499,6 +723,12 @@ var rootCmd = &cobra.Command{
 			}{doltAutoCommit, true}
 		}
 
+		// --ignore-schema-skew sets BD_IGNORE_SCHEMA_SKEW so the env-var escape
+		// hatch works uniformly for all store open paths (dolt, embedded).
+		if ignoreSchemaSkew {
+			_ = os.Setenv("BD_IGNORE_SCHEMA_SKEW", "1")
+		}
+
 		// Check for and log configuration overrides (only in verbose mode)
 		if verboseFlag {
 			overrides := config.CheckOverrides(flagOverrides)
@@ -506,22 +736,6 @@ var rootCmd = &cobra.Command{
 				config.LogOverride(override)
 			}
 		}
-
-		// Validate Dolt auto-commit mode early so all commands fail fast on invalid config.
-		if _, err := getDoltAutoCommitMode(); err != nil {
-			FatalError("%v", err)
-		}
-
-		// GH#2677: Load .beads/.env before the noDbCommands early return so that
-		// commands like "bd doctor --server" pick up per-project Dolt credentials.
-		if !isSelectedNoDBCommand(cmd) {
-			loadEnvironment()
-		}
-
-		// Load storage mode (embedded vs server) early so that isEmbeddedMode()
-		// returns the correct value for all commands, including those that skip
-		// full DB initialization (e.g., bd dolt status, bd doctor, bd bootstrap).
-		loadServerModeFromConfig()
 
 		// GH#1093: Check noDbCommands BEFORE expensive operations
 		// to avoid spawning git subprocesses for simple commands
@@ -533,9 +747,11 @@ var rootCmd = &cobra.Command{
 			"bootstrap",
 			"completion",
 			"context", // reads config files directly, does not need DB open
+			"codex-hook",
 			"doctor",
 			"dolt", // bare "bd dolt" shows help only; subcommands handled below
 			"fish",
+			"formula", // parser-only subcommands; add a store-needed guard before adding DB-backed formula subcommands
 			"help",
 			"hook", // manages its own store lifecycle (#1719)
 			"hooks",
@@ -548,6 +764,7 @@ var rootCmd = &cobra.Command{
 			"quickstart",
 			"setup",
 			"version",
+			"where",
 			"zsh",
 		}
 
@@ -564,6 +781,7 @@ var rootCmd = &cobra.Command{
 		// Check both the command name and parent command name for subcommands
 		cmdName := cmd.Name()
 		isSubcommand := cmd.Parent() != nil && cmd.Parent().Name() != "bd"
+		skipsStoreInit := false
 		if cmd.Parent() != nil {
 			parentName := cmd.Parent().Name()
 			if parentName == "dolt" && slices.Contains(needsStoreDoltSubcommands, cmdName) {
@@ -571,22 +789,46 @@ var rootCmd = &cobra.Command{
 			} else if slices.Contains(needsStoreDoltGrandchildren, parentName) {
 				// GH#2224: dolt remote add/list/remove need the store — fall through to init
 			} else if slices.Contains(noDbCommands, parentName) {
-				return
+				skipsStoreInit = true
 			}
 		}
 		// Only skip for top-level commands in noDbCommands, not subcommands
 		// that happen to share names (e.g., "bd backup init" vs "bd init").
 		if slices.Contains(noDbCommands, cmdName) && !isSubcommand {
-			return
+			skipsStoreInit = true
 		}
 
 		// Skip for root command with no subcommand (just shows help)
 		if cmd.Parent() == nil && cmdName == cmd.Use {
-			return
+			skipsStoreInit = true
 		}
 
 		// Also skip for --version flag on root command (cmdName would be "bd")
 		if v, _ := cmd.Flags().GetBool("version"); v {
+			skipsStoreInit = true
+		}
+
+		// Commands that skip store initialization still need early config/env
+		// setup before they inspect server mode or per-project Dolt settings.
+		// Rebind them to the selected workspace so explicit --db / BEADS_DB
+		// targets behave consistently across doctor/bootstrap/context/dolt.
+		if skipsStoreInit {
+			prepareSelectedNoDBContext(selectedNoDBBeadsDir(cmd))
+			refreshBoundCommandConfig(cmd)
+			if beadsDir := os.Getenv("BEADS_DIR"); beadsDir == "" {
+				loadEnvironment()
+				loadServerModeFromConfig()
+			}
+			if _, err := getDoltAutoCommitMode(); err != nil {
+				FatalError("%v", err)
+			}
+		}
+
+		// Ambient staleness warning: if Linear data is stale, warn once per
+		// shell session on stderr. Only fires when LINEAR_API_KEY is set.
+		maybeWarnLinearStaleness(cmd)
+
+		if skipsStoreInit {
 			return
 		}
 
@@ -615,7 +857,17 @@ var rootCmd = &cobra.Command{
 		// When .beads/redirect points to a shared directory with a different
 		// dolt_database, the source's database name would be lost. Capture it
 		// early and set BEADS_DOLT_SERVER_DATABASE so all store opens use it.
-		preserveRedirectSourceDatabase(beads.GetRedirectInfo().LocalDir)
+		if dbPath == "" {
+			preserveRedirectSourceDatabase(beads.GetRedirectInfo().LocalDir)
+		}
+
+		if dbPath == "" {
+			if bd := beads.FindBeadsDir(); bd != "" {
+				if cfg, _ := configfile.Load(bd); cfg != nil && cfg.IsDoltProxiedServerMode() {
+					dbPath = bd
+				}
+			}
+		}
 
 		// Initialize database path
 		if dbPath == "" {
@@ -626,15 +878,20 @@ var rootCmd = &cobra.Command{
 				// No database found — allow some commands to run without a database
 				// - import: auto-initializes database if missing
 				// - setup: creates editor integration files (no DB needed)
-				// - config set/get for yaml-only keys: writes to config.yaml, not db (GH#536)
-				isYamlOnlyConfigOp := false
-				if (cmd.Name() == "set" || cmd.Name() == "get") && cmd.Parent() != nil && cmd.Parent().Name() == "config" {
-					if len(args) > 0 && config.IsYamlOnlyKey(args[0]) {
-						isYamlOnlyConfigOp = true
+				// - config subcommands that operate on config.yaml, git config,
+				//   or best-effort diagnostics only (GH#536, bd-934, bd-omc, bd-3rw)
+				if configCommandCanRunWithoutStore(cmd, args) {
+					// When --db is provided, resolve BEADS_DIR so yaml-only
+					// config writes target the correct directory (GH#3348).
+					if dbPath != "" {
+						if beadsDir := resolveCommandBeadsDir(dbPath); beadsDir != "" {
+							prepareSelectedCommandContext(beadsDir, false)
+						}
 					}
+					return
 				}
 
-				if cmd.Name() != "import" && cmd.Name() != "setup" && !isYamlOnlyConfigOp {
+				if cmd.Name() != "import" && cmd.Name() != "setup" {
 					// No database found - provide context-aware error message
 					fmt.Fprintf(os.Stderr, "Error: no beads database found\n")
 					fmt.Fprintf(os.Stderr, "Hint: %s\n", diagHint())
@@ -655,6 +912,13 @@ var rootCmd = &cobra.Command{
 				}
 				dbPath = utils.CanonicalizePath(filepath.Join(targetBeadsDir, beads.CanonicalDatabaseName))
 			}
+		}
+
+		beadsDir := resolveCommandBeadsDir(dbPath)
+		prepareSelectedCommandContext(beadsDir, true)
+		refreshBoundCommandConfig(cmd)
+		if _, err := getDoltAutoCommitMode(); err != nil {
+			FatalError("%v", err)
 		}
 
 		// Set actor for audit trail
@@ -678,7 +942,6 @@ var rootCmd = &cobra.Command{
 		// opens its own store connection, writes the version metadata, commits it,
 		// and closes BEFORE the main store is opened. This ensures bd doctor and
 		// read-only commands see the correct version after a CLI upgrade.
-		beadsDir := resolveCommandBeadsDir(dbPath)
 
 		autoMigrateOnVersionBump(beadsDir)
 
@@ -699,11 +962,18 @@ var rootCmd = &cobra.Command{
 			fmt.Fprintf(os.Stderr, "warning: failed to load beads config from %s: %v\n", beadsDir, cfgErr)
 		}
 		if cfg != nil {
+			doltCfg.ProxiedServer = cfg.IsDoltProxiedServerMode()
+			proxiedServerMode = doltCfg.ProxiedServer
+			if cmdCtx != nil {
+				cmdCtx.ProxiedServerMode = doltCfg.ProxiedServer
+			}
+
 			doltCfg.ServerMode = cfg.IsDoltServerMode()
 			// Shared server mode (dolt.shared-server in config.yaml) is a
 			// form of server mode. Override metadata.json if it still says
-			// embedded — handles installs created before GH#2946 fix.
-			if !doltCfg.ServerMode && doltserver.IsSharedServerMode() {
+			// embedded — handles installs created before GH#2946 fix. Skip
+			// this for proxied-server: it's its own backend, not server.
+			if !doltCfg.ServerMode && !doltCfg.ProxiedServer && doltserver.IsSharedServerMode() {
 				doltCfg.ServerMode = true
 			}
 			serverMode = doltCfg.ServerMode
@@ -714,32 +984,76 @@ var rootCmd = &cobra.Command{
 			// Always set database name (needed for bootstrap to find
 			// prefix-based databases like "beads_hq"; see #1669)
 			doltCfg.Database = cfg.GetDoltDatabase()
+			if shouldLogDefaultDoltDatabase(cfg) {
+				logConfigDiscovery(beadsDir, fmt.Sprintf("metadata loaded without dolt_database; using default database name %q", configfile.DefaultDoltDatabase))
+			}
 
 			doltCfg.ServerHost = cfg.GetDoltServerHost()
 			// Use doltserver.DefaultConfig for port resolution (env > port file >
 			// config.yaml). Port 0 is fine here — auto-start will resolve it.
 			doltCfg.ServerPort = doltserver.DefaultConfig(beadsDir).Port
+			doltCfg.ServerSocket = cfg.GetDoltServerSocket()
 			doltCfg.ServerUser = cfg.GetDoltServerUser()
 			// Use the resolved port for credential lookup — metadata.json port
 			// and runtime port can diverge (e.g., tunnel on 3308 vs local on 3307).
 			doltCfg.ServerPassword = cfg.GetDoltServerPasswordForPort(doltCfg.ServerPort)
 			doltCfg.ServerTLS = cfg.GetDoltServerTLS()
 		} else if cfgErr == nil {
+			logConfigDiscovery(beadsDir, "config discovery")
 			// Load returned (nil, nil) — no config file found.
-			// Log so silent fallback to default DB is visible.
-			fmt.Fprintf(os.Stderr, "warning: no beads configuration found in %s; database name may default incorrectly\n", beadsDir)
+			// Fall back to the canonical default database name; matches the
+			// behavior of newDoltStoreFromConfig / newReadOnlyStoreFromConfig
+			// (see store_factory.go). Without this, embeddeddolt.New rejects
+			// the empty database name with "database name must not be empty
+			// (caller should default to \"beads\")".
+			fmt.Fprintf(os.Stderr, "warning: no beads configuration found in %s; using default database name %q\n", beadsDir, configfile.DefaultDoltDatabase)
+			doltCfg.Database = configfile.DefaultDoltDatabase
 		}
-		doltCfg.SyncGitRemote = config.GetString("sync.git-remote")
+		// If config parse failed (cfgErr != nil), still default the database
+		// name so the store-open error is about the real problem (the parse
+		// failure warning already printed) rather than a confusing "database
+		// name must not be empty" downstream.
+		if doltCfg.Database == "" {
+			doltCfg.Database = configfile.DefaultDoltDatabase
+		}
+		doltCfg.SyncRemote = resolveSyncRemote()
+
+		// --global flag: switch to the global shared-server database.
+		// Must be in shared-server mode; errors otherwise.
+		if globalFlag {
+			if !doltserver.IsSharedServerMode() {
+				FatalError("--global requires shared-server mode (set BEADS_DOLT_SHARED_SERVER=1 or dolt.shared-server: true in config.yaml)")
+			}
+			doltCfg.Database = doltserver.GlobalDatabaseName
+		}
 
 		// Keep standalone CLI auto-start behavior centralized so doctor and
 		// other helper paths stay in lockstep with the main command path.
 		dolt.ApplyCLIAutoStart(beadsDir, doltCfg)
 
-		// Server mode defaults auto-commit to OFF because the server handles
-		// commits via its own transaction lifecycle; firing DOLT_COMMIT after
-		// every write under concurrent load causes 'database is read only' errors.
+		if proxiedServerMode {
+			p, err := newProxiedServerUOWProvider(rootCtx, beadsDir)
+			if err != nil {
+				FatalError("failed to open uow provider: %v", err)
+			}
+			uowProvider = p
+
+			syncCommandContext()
+			return
+		}
+
+		// Default auto-commit based on mode when the user hasn't set a value:
+		// - Server mode: OFF — the server handles commits via its own transaction
+		//   lifecycle; firing DOLT_COMMIT after every write under concurrent load
+		//   causes 'database is read only' errors.
+		// - Embedded mode: ON — each command writes to the working set and needs
+		//   a Dolt commit in PersistentPostRun to persist changes to history.
 		if strings.TrimSpace(doltAutoCommit) == "" {
-			doltAutoCommit = string(doltAutoCommitOff)
+			if !usesSQLServer() {
+				doltAutoCommit = string(doltAutoCommitOn)
+			} else {
+				doltAutoCommit = string(doltAutoCommitOff)
+			}
 		}
 
 		doltCfg.Path = doltPath
@@ -759,6 +1073,16 @@ var rootCmd = &cobra.Command{
 			if handleFreshCloneError(err) {
 				os.Exit(1)
 			}
+			// Schema skew gets dedicated UX with actionable rebuild instructions.
+			var skewErr *schema.SchemaSkewError
+			if errors.As(err, &skewErr) {
+				if jsonOutput {
+					handleSchemaSkewJSON(skewErr)
+				} else {
+					fmt.Fprint(os.Stderr, skewErr.UserMessage())
+				}
+				os.Exit(1)
+			}
 			FatalError("failed to open database: %v", err)
 		}
 
@@ -767,9 +1091,22 @@ var rootCmd = &cobra.Command{
 		storeActive = true
 		storeMutex.Unlock()
 
+		// Auto-import from issues.jsonl when embedded database is empty (GH#2994).
+		// This handles the upgrade path from pre-0.56 (dolt/) to 1.0+ (embeddeddolt/)
+		// where the new embedded database starts empty but the git-tracked JSONL
+		// still has all the user's data.
+		// Skip auto-import when the user is explicitly running "bd import" —
+		// the import command handles JSONL files itself and auto-importing
+		// first would interfere (double-import / upsert confusion).
+		if shouldRunAutoImportJSONL(cmd, store, useReadOnly, globalFlag, doltCfg.ServerMode) {
+			maybeAutoImportJSONL(rootCtx, store, beadsDir)
+		}
+
 		// Validate workspace identity for write commands (GH#2438, GH#2372)
-		// Skip for read-only commands since they can't corrupt data
-		if !useReadOnly && os.Getenv("BEADS_SKIP_IDENTITY_CHECK") != "1" {
+		// Skip for read-only commands since they can't corrupt data.
+		// Skip for --global: the global database uses a sentinel project ID
+		// that won't match any project's metadata.json.
+		if !useReadOnly && !globalFlag && os.Getenv("BEADS_SKIP_IDENTITY_CHECK") != "1" {
 			validateWorkspaceIdentity(rootCtx, beadsDir)
 		}
 
@@ -812,61 +1149,76 @@ var rootCmd = &cobra.Command{
 		// after successful command execution, not in PreRun
 	},
 	PersistentPostRun: func(cmd *cobra.Command, args []string) {
-		// Dolt auto-commit: after a successful write command (and after final flush),
-		// create a Dolt commit so changes don't remain only in the working set.
-		if commandDidWrite.Load() && !commandDidExplicitDoltCommit {
-			if err := maybeAutoCommit(rootCtx, doltAutoCommitParams{Command: cmd.Name()}); err != nil {
-				FatalError("dolt auto-commit failed: %v", err)
-			}
-		}
+		defer restoreChangeDirSelection()
 
-		// Tip metadata auto-commit: if a tip was shown, create a separate Dolt commit for the
-		// tip_*_last_shown metadata updates. This may happen even for otherwise read-only commands.
-		if commandDidWriteTipMetadata && len(commandTipIDsShown) > 0 {
-			// Only applies when dolt auto-commit is enabled and backend is versioned (Dolt).
-			if mode, err := getDoltAutoCommitMode(); err != nil {
-				FatalError("dolt tip auto-commit failed: %v", err)
-			} else if mode == doltAutoCommitOn {
-				// Apply tip metadata writes now (deferred in recordTipShown for Dolt).
-				for tipID := range commandTipIDsShown {
-					key := fmt.Sprintf("tip_%s_last_shown", tipID)
-					value := time.Now().Format(time.RFC3339)
-					if err := store.SetMetadata(rootCtx, key, value); err != nil {
+		if proxiedServerMode {
+			if uowProvider != nil {
+				_ = uowProvider.Close(rootCtx)
+				uowProvider = nil
+			}
+		} else {
+			// Dolt auto-commit: after a successful write command (and after final flush),
+			// create a Dolt commit so changes don't remain only in the working set.
+			if commandDidWrite.Load() && !commandDidExplicitDoltCommit {
+				if err := maybeAutoCommit(rootCtx, doltAutoCommitParams{Command: cmd.Name()}); err != nil {
+					FatalError("dolt auto-commit failed: %v", err)
+				}
+			}
+
+			// Tip metadata auto-commit: if a tip was shown, create a separate Dolt commit for the
+			// tip_*_last_shown metadata updates. This may happen even for otherwise read-only commands.
+			if commandDidWriteTipMetadata && len(commandTipIDsShown) > 0 {
+				// Only applies when dolt auto-commit is enabled and backend is versioned (Dolt).
+				if mode, err := getDoltAutoCommitMode(); err != nil {
+					FatalError("dolt tip auto-commit failed: %v", err)
+				} else if mode == doltAutoCommitOn {
+					// Apply tip metadata writes now (deferred in recordTipShown for Dolt).
+					for tipID := range commandTipIDsShown {
+						key := fmt.Sprintf("tip_%s_last_shown", tipID)
+						value := time.Now().Format(time.RFC3339)
+						if err := store.SetLocalMetadata(rootCtx, key, value); err != nil {
+							FatalError("dolt tip auto-commit failed: %v", err)
+						}
+					}
+
+					ids := make([]string, 0, len(commandTipIDsShown))
+					for tipID := range commandTipIDsShown {
+						ids = append(ids, tipID)
+					}
+					msg := formatDoltAutoCommitMessage("tip", getActor(), ids)
+					if err := maybeAutoCommit(rootCtx, doltAutoCommitParams{Command: "tip", MessageOverride: msg}); err != nil {
 						FatalError("dolt tip auto-commit failed: %v", err)
 					}
 				}
+			}
 
-				ids := make([]string, 0, len(commandTipIDsShown))
-				for tipID := range commandTipIDsShown {
-					ids = append(ids, tipID)
-				}
-				msg := formatDoltAutoCommitMessage("tip", getActor(), ids)
-				if err := maybeAutoCommit(rootCtx, doltAutoCommitParams{Command: "tip", MessageOverride: msg}); err != nil {
-					FatalError("dolt tip auto-commit failed: %v", err)
+			// Auto-backup: sync a Dolt-native backup if enabled and due
+			maybeAutoBackup(rootCtx)
+
+			// Auto-export: write git-tracked JSONL for portability if enabled and due.
+			// Read-only commands must not perform post-run maintenance writes or emit
+			// sync guidance after machine-readable output.
+			if shouldRunPostCommandAutoExport(cmd) {
+				if err := maybeAutoExport(rootCtx, serverMode, commandAllowsEmptyAutoExport(cmd)); err != nil {
+					FatalError("%v", err)
 				}
 			}
-		}
 
-		// Auto-backup: export JSONL to .beads/backup/ if enabled and due
-		maybeAutoBackup(rootCtx)
+			// Auto-push: push to Dolt remote if enabled and due.
+			// Skip for read-only commands to avoid unnecessary network operations
+			// and metadata writes on commands like bd list/show/ready (GH#2191).
+			if !isReadOnlyCommand(cmd.Name()) {
+				maybeAutoPush(rootCtx)
+			}
 
-		// Auto-export: write git-tracked JSONL for portability if enabled and due
-		maybeAutoExport(rootCtx)
+			// Signal that store is closing (prevents background flush from accessing closed store)
+			storeMutex.Lock()
+			storeActive = false
+			storeMutex.Unlock()
 
-		// Auto-push: push to Dolt remote if enabled and due.
-		// Skip for read-only commands to avoid unnecessary network operations
-		// and metadata writes on commands like bd list/show/ready (GH#2191).
-		if !isReadOnlyCommand(cmd.Name()) {
-			maybeAutoPush(rootCtx)
-		}
-
-		// Signal that store is closing (prevents background flush from accessing closed store)
-		storeMutex.Lock()
-		storeActive = false
-		storeMutex.Unlock()
-
-		if store != nil {
-			_ = store.Close() // Best effort cleanup
+			if store != nil {
+				_ = store.Close() // Best effort cleanup
+			}
 		}
 
 		// End the command span and flush OTel data before process exit.
@@ -892,6 +1244,32 @@ var rootCmd = &cobra.Command{
 			rootCancel()
 		}
 	},
+}
+
+func shouldRunPostCommandAutoExport(cmd *cobra.Command) bool {
+	if cmd == nil {
+		return true
+	}
+	return !isReadOnlyCommand(cmd.Name())
+}
+
+func shouldRunAutoImportJSONL(cmd *cobra.Command, s storage.DoltStorage, useReadOnly, globalFlag, serverMode bool) bool {
+	if cmd == nil || s == nil || useReadOnly || globalFlag || serverMode {
+		return false
+	}
+	return cmd.Name() != "import"
+}
+
+func commandAllowsEmptyAutoExport(cmd *cobra.Command) bool {
+	if cmd == nil {
+		return false
+	}
+	switch cmd.Name() {
+	case "prune", "purge":
+		return commandMayEmptyJSONLExport.Load()
+	default:
+		return false
+	}
 }
 
 // blockedEnvVars lists environment variables that must not be set because they
@@ -957,10 +1335,11 @@ func flushBatchCommitOnShutdown() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	committed, commitErr := st.CommitPending(ctx, getActor())
-	if commitErr != nil {
-		fmt.Fprintf(os.Stderr, "\nWarning: failed to flush batch commit on shutdown: %v\n", commitErr)
-	} else if committed {
+	if err := st.Commit(ctx, "bd: flush pending changes on shutdown"); err != nil {
+		if !isDoltNothingToCommit(err) {
+			fmt.Fprintf(os.Stderr, "\nWarning: failed to flush batch commit on shutdown: %v\n", err)
+		}
+	} else {
 		fmt.Fprintf(os.Stderr, "\nFlushed pending batch commit on shutdown\n")
 	}
 }
@@ -1004,6 +1383,7 @@ func validateWorkspaceIdentity(ctx context.Context, beadsDir string) {
 		fmt.Fprintf(os.Stderr, "  • BEADS_DIR points to a different project's .beads/\n")
 		fmt.Fprintf(os.Stderr, "  • Dolt server endpoint changed and now serves a different database\n")
 		fmt.Fprintf(os.Stderr, "  • metadata.json was copied from another project\n\n")
+		fmt.Fprintf(os.Stderr, "Recovery: run 'bd doctor --fix' or 'bd bootstrap' to reconcile workspace metadata with the authoritative database when shared-server metadata drifted.\n")
 		fmt.Fprintf(os.Stderr, "To diagnose: bd context --json\n")
 		fmt.Fprintf(os.Stderr, "To override: set BEADS_SKIP_IDENTITY_CHECK=1\n")
 		os.Exit(1)

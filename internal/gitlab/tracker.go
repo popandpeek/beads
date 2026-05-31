@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
@@ -148,6 +149,16 @@ func (t *Tracker) FetchIssues(ctx context.Context, opts tracker.FetchOptions) ([
 	}
 	if err != nil {
 		return nil, err
+	}
+
+	// Enrich each issue with its links (dependencies).
+	for i := range issues {
+		links, err := t.client.GetIssueLinks(ctx, issues[i].IID)
+		if err != nil {
+			// Non-fatal: issue may lack link permissions or be in a different project.
+			continue
+		}
+		issues[i].IssueLinksData = links
 	}
 
 	result := make([]tracker.TrackerIssue, 0, len(issues))
@@ -447,7 +458,23 @@ func (t *Tracker) BuildExternalRef(issue *tracker.TrackerIssue) string {
 }
 
 // getConfig reads a config value from storage, falling back to env var.
+// For yaml-only keys (e.g. gitlab.token), reads from config.yaml first
+// to avoid leaking secrets when pushing the Dolt database to remotes.
 func (t *Tracker) getConfig(ctx context.Context, key, envVar string) (string, error) {
+	// Secret keys are stored in config.yaml, not the Dolt database,
+	// to avoid leaking secrets when pushing to remotes.
+	if config.IsYamlOnlyKey(key) {
+		if val := config.GetString(key); val != "" {
+			return val, nil
+		}
+		if envVar != "" {
+			if envVal := os.Getenv(envVar); envVal != "" {
+				return envVal, nil
+			}
+		}
+		return "", nil
+	}
+
 	val, err := t.store.GetConfig(ctx, key)
 	if err == nil && val != "" {
 		return val, nil

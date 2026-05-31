@@ -18,11 +18,11 @@ func bdHuman(t *testing.T, bd, dir string, args ...string) string {
 	cmd := exec.Command(bd, fullArgs...)
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd human %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		t.Fatalf("bd human %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
-	return string(out)
+	return stdout.String()
 }
 
 func TestEmbeddedHuman(t *testing.T) {
@@ -111,7 +111,7 @@ func TestEmbeddedHumanConcurrent(t *testing.T) {
 	wg.Wait()
 
 	for _, r := range results {
-		if r.err != nil {
+		if r.err != nil && !strings.Contains(r.err.Error(), "one writer at a time") {
 			t.Errorf("worker %d failed: %v", r.worker, r.err)
 		}
 	}

@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/beads/internal/config"
 )
 
 const ConfigFileName = "metadata.json"
@@ -26,6 +28,7 @@ type Config struct {
 	DoltMode           string `json:"dolt_mode,omitempty"`            // "embedded" (default) or "server"
 	DoltServerHost     string `json:"dolt_server_host,omitempty"`     // Server host (default: 127.0.0.1)
 	DoltServerPort     int    `json:"dolt_server_port,omitempty"`     // Server port (default: 3307)
+	DoltServerSocket   string `json:"dolt_server_socket,omitempty"`   // Unix domain socket path (overrides host/port)
 	DoltServerUser     string `json:"dolt_server_user,omitempty"`     // MySQL user (default: root)
 	DoltDatabase       string `json:"dolt_database,omitempty"`        // SQL database name (default: beads)
 	DoltServerTLS      bool   `json:"dolt_server_tls,omitempty"`      // Enable TLS for server connections (required for Hosted Dolt)
@@ -37,6 +40,9 @@ type Config struct {
 	// Used to detect cross-project data leakage when a client connects
 	// to the wrong Dolt server (GH#2372).
 	ProjectID string `json:"project_id,omitempty"`
+
+	GlobalDoltDatabase string `json:"global_dolt_database,omitempty"`
+	GlobalProjectID    string `json:"global_project_id,omitempty"`
 
 	// Stale closed issues check configuration
 	// 0 = disabled (default), positive = threshold in days
@@ -105,10 +111,6 @@ func Load(beadsDir string) (*Config, error) {
 func (c *Config) Save(beadsDir string) error {
 	configPath := ConfigPath(beadsDir)
 
-	// Strip absolute dolt_data_dir before saving — metadata.json is committed
-	// to git and propagates to other clones, but absolute paths are
-	// machine-specific and cause data-loss on other machines (GH#2251).
-	// Users should set absolute paths via BEADS_DOLT_DATA_DIR env var instead.
 	saved := *c
 	if filepath.IsAbs(saved.DoltDataDir) {
 		saved.DoltDataDir = ""
@@ -193,11 +195,10 @@ func CapabilitiesForBackend(_ string) BackendCapabilities {
 
 // GetCapabilities returns the backend capabilities for this config.
 // Unlike CapabilitiesForBackend(string), this considers Dolt server mode
-// which supports multi-process access.
+// (and proxied-server mode) which support multi-process access.
 func (c *Config) GetCapabilities() BackendCapabilities {
 	backend := c.GetBackend()
-	if backend == BackendDolt && c.IsDoltServerMode() {
-		// Server mode supports multi-writer, so NOT single-process-only
+	if backend == BackendDolt && (c.IsDoltServerMode() || c.IsDoltProxiedServerMode()) {
 		return BackendCapabilities{SingleProcessOnly: false}
 	}
 	return CapabilitiesForBackend(backend)
@@ -210,8 +211,9 @@ func (c *Config) GetBackend() string {
 
 // Dolt mode constants
 const (
-	DoltModeEmbedded = "embedded"
-	DoltModeServer   = "server"
+	DoltModeEmbedded      = "embedded"
+	DoltModeServer        = "server"
+	DoltModeProxiedServer = "proxied-server"
 )
 
 // Default Dolt server settings
@@ -229,7 +231,8 @@ const (
 // Checks (in priority order):
 //  1. BEADS_DOLT_SERVER_MODE=1 env var
 //  2. BEADS_DOLT_SHARED_SERVER env var (shared-server implies server mode)
-//  3. dolt_mode field in metadata.json
+//  3. dolt_mode field in metadata.json (project-local, explicit)
+//  4. dolt.mode in config.yaml (user-global fallback, only when metadata.json has no mode)
 //
 // Runtime env vars take precedence over persisted metadata.json to prevent
 // stale dolt_mode=embedded from overriding active server intent (GH#2949).
@@ -245,7 +248,22 @@ func (c *Config) IsDoltServerMode() bool {
 	if v := os.Getenv("BEADS_DOLT_SHARED_SERVER"); v == "1" || strings.EqualFold(v, "true") {
 		return true
 	}
-	return strings.ToLower(c.DoltMode) == DoltModeServer
+	if c.DoltMode != "" {
+		// metadata.json has an explicit mode — respect it over config.yaml
+		return strings.ToLower(c.DoltMode) == DoltModeServer
+	}
+	// Fall back to config.yaml dolt.mode setting (no metadata.json mode set)
+	if mode := config.GetYamlConfig("dolt.mode"); strings.EqualFold(mode, "server") {
+		return true
+	}
+	return false
+}
+
+func (c *Config) IsDoltProxiedServerMode() bool {
+	if c.GetBackend() != BackendDolt {
+		return false
+	}
+	return strings.ToLower(c.DoltMode) == DoltModeProxiedServer
 }
 
 // GetDoltMode returns the Dolt connection mode, defaulting to server.
@@ -257,13 +275,20 @@ func (c *Config) GetDoltMode() string {
 }
 
 // GetDoltServerHost returns the Dolt server host.
-// Checks BEADS_DOLT_SERVER_HOST env var first, then config, then default.
+// Priority: BEADS_DOLT_SERVER_HOST env var > metadata.json dolt_server_host
+// > config.yaml / global config dolt.host > DefaultDoltServerHost.
+// The config.yaml layer mirrors the dolt.port fix (GH#2073) so a shared
+// team / user-level Dolt server can be configured once without per-clone
+// metadata.json edits.
 func (c *Config) GetDoltServerHost() string {
 	if h := os.Getenv("BEADS_DOLT_SERVER_HOST"); h != "" {
 		return h
 	}
 	if c.DoltServerHost != "" {
 		return c.DoltServerHost
+	}
+	if h := config.GetYamlConfig("dolt.host"); h != "" {
+		return h
 	}
 	return DefaultDoltServerHost
 }
@@ -293,6 +318,15 @@ func (c *Config) GetDoltServerPort() int {
 	return DefaultDoltServerPort
 }
 
+// GetDoltServerSocket returns the Dolt server Unix domain socket path.
+// Checks BEADS_DOLT_SERVER_SOCKET env var first, then config. Empty means use TCP.
+func (c *Config) GetDoltServerSocket() string {
+	if s := os.Getenv("BEADS_DOLT_SERVER_SOCKET"); s != "" {
+		return s
+	}
+	return c.DoltServerSocket
+}
+
 // GetDoltServerUser returns the Dolt server MySQL user.
 // Checks BEADS_DOLT_SERVER_USER env var first, then config, then default.
 func (c *Config) GetDoltServerUser() string {
@@ -315,6 +349,16 @@ func (c *Config) GetDoltDatabase() string {
 		return c.DoltDatabase
 	}
 	return DefaultDoltDatabase
+}
+
+// GetGlobalDoltDatabase returns the global database name for shared-server mode.
+// Returns empty string if no global database is configured.
+func (c *Config) GetGlobalDoltDatabase() string {
+	return c.GlobalDoltDatabase
+}
+
+func (c *Config) GetGlobalProjectID() string {
+	return c.GlobalProjectID
 }
 
 // GetDoltServerPassword returns the Dolt server password.

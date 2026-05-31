@@ -211,6 +211,11 @@ type Step struct {
 	// Labels are applied to the created issue.
 	Labels []string `json:"labels,omitempty"`
 
+	// Metadata is carried through to the created issue's Metadata field as
+	// JSON. Lets formulas pre-declare keys that downstream tooling can project
+	// without a post-pour compose step.
+	Metadata map[string]interface{} `json:"metadata,omitempty" toml:"metadata,omitempty"`
+
 	// DependsOn lists step IDs this step blocks on (within the formula).
 	DependsOn []string `json:"depends_on,omitempty" toml:"depends_on,omitempty"`
 
@@ -277,6 +282,10 @@ type Gate struct {
 
 	// ID is the condition identifier (e.g., workflow name for gh:run).
 	ID string `json:"id,omitempty"`
+
+	// AwaitID is the runtime condition identifier. This is preferred by
+	// formula authors because it maps directly to Issue.AwaitID.
+	AwaitID string `json:"await_id,omitempty" toml:"await_id,omitempty"`
 
 	// Timeout is how long to wait before escalation (e.g., "1h", "24h").
 	Timeout string `json:"timeout,omitempty"`

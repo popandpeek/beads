@@ -1,6 +1,8 @@
 package issueops
 
 import (
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -127,6 +129,43 @@ func TestBuildIssueFilterClauses_ExcludeStatus(t *testing.T) {
 	}
 }
 
+func TestBuildIssueFilterClausesUsesDirectIssueTypePredicates(t *testing.T) {
+	t.Parallel()
+
+	issueType := types.TypeTask
+	clauses, args, err := BuildIssueFilterClauses("", types.IssueFilter{IssueType: &issueType}, WispsFilterTables)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := strings.Join(clauses, " AND ")
+	if strings.Contains(got, "id IN (SELECT id FROM wisps WHERE issue_type") {
+		t.Fatalf("issue type filter should not use self-subquery: %s", got)
+	}
+	if !strings.Contains(got, "issue_type = ?") {
+		t.Fatalf("issue type filter missing direct predicate: %s", got)
+	}
+	if !reflect.DeepEqual(args, []interface{}{issueType}) {
+		t.Fatalf("args = %#v", args)
+	}
+
+	clauses, args, err = BuildIssueFilterClauses("", types.IssueFilter{
+		ExcludeTypes: []types.IssueType{types.TypeTask, types.TypeBug},
+	}, WispsFilterTables)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got = strings.Join(clauses, " AND ")
+	if strings.Contains(got, "id IN (SELECT id FROM wisps WHERE issue_type") {
+		t.Fatalf("issue type exclusion should not use self-subquery: %s", got)
+	}
+	if !strings.Contains(got, "issue_type NOT IN") {
+		t.Fatalf("issue type exclusion missing direct predicate: %s", got)
+	}
+	if !reflect.DeepEqual(args, []interface{}{"task", "bug"}) {
+		t.Fatalf("args = %#v", args)
+	}
+}
+
 func TestBuildIssueFilterClauses_PriorityRange(t *testing.T) {
 	t.Parallel()
 
@@ -178,6 +217,76 @@ func TestBuildIssueFilterClauses_LabelsAny(t *testing.T) {
 	}
 }
 
+func TestBuildLabelDrivenSearchUsesLabelJoins(t *testing.T) {
+	t.Parallel()
+
+	filter := types.IssueFilter{
+		Labels:    []string{"bug", "urgent"},
+		LabelsAny: []string{"frontend", "backend"},
+	}
+
+	fromSQL, where, args, labelDriven, filterForClauses := buildLabelDrivenSearch(filter, IssuesFilterTables)
+
+	if !strings.Contains(fromSQL, "JOIN labels label_filter_0 ON label_filter_0.issue_id = issues.id") {
+		t.Fatalf("fromSQL missing first label join: %s", fromSQL)
+	}
+	if !strings.Contains(fromSQL, "JOIN labels label_filter_any ON label_filter_any.issue_id = issues.id") {
+		t.Fatalf("fromSQL missing any-label join: %s", fromSQL)
+	}
+	if got, want := strings.Join(where, " AND "), "label_filter_0.label = ? AND label_filter_1.label = ? AND label_filter_any.label IN (?, ?)"; got != want {
+		t.Fatalf("where = %q, want %q", got, want)
+	}
+	if !reflect.DeepEqual(args, []interface{}{"bug", "urgent", "frontend", "backend"}) {
+		t.Fatalf("args = %#v", args)
+	}
+	if !labelDriven {
+		t.Fatal("labelDriven = false, want true")
+	}
+	if len(filterForClauses.Labels) != 0 || len(filterForClauses.LabelsAny) != 0 {
+		t.Fatalf("label filters should be removed before generic clause build: %#v", filterForClauses)
+	}
+}
+
+func TestBuildIssueFilterClauses_ExcludeLabels(t *testing.T) {
+	t.Parallel()
+
+	filter := types.IssueFilter{ExcludeLabels: []string{"triage:pending", "wontfix"}}
+	clauses, args, err := BuildIssueFilterClauses("", filter, IssuesFilterTables)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Exclude labels produce a single NOT IN clause
+	if len(clauses) != 1 {
+		t.Fatalf("expected 1 clause for exclude labels, got %d", len(clauses))
+	}
+	if len(args) != 2 {
+		t.Errorf("expected 2 args for 2 exclude labels, got %d", len(args))
+	}
+	if !strings.Contains(clauses[0], "NOT IN") {
+		t.Errorf("expected NOT IN clause, got %q", clauses[0])
+	}
+}
+
+func TestBuildIssueFilterClauses_ExcludeLabelsWithInclude(t *testing.T) {
+	t.Parallel()
+
+	filter := types.IssueFilter{
+		Labels:        []string{"backend"},
+		ExcludeLabels: []string{"triage:pending"},
+	}
+	clauses, args, err := BuildIssueFilterClauses("", filter, IssuesFilterTables)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// 1 AND label clause + 1 exclude clause
+	if len(clauses) != 2 {
+		t.Fatalf("expected 2 clauses, got %d", len(clauses))
+	}
+	if len(args) != 2 {
+		t.Errorf("expected 2 args, got %d", len(args))
+	}
+}
+
 func TestBuildIssueFilterClauses_DateFilters(t *testing.T) {
 	t.Parallel()
 
@@ -196,6 +305,28 @@ func TestBuildIssueFilterClauses_DateFilters(t *testing.T) {
 	}
 	if len(args) != 2 {
 		t.Errorf("expected 2 args, got %d", len(args))
+	}
+}
+
+func TestBuildIssueFilterClauses_DeferredIncludesStatus(t *testing.T) {
+	t.Parallel()
+	clauses, args, err := BuildIssueFilterClauses("", types.IssueFilter{Deferred: true}, IssuesFilterTables)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := "(defer_until IS NOT NULL OR status = ?)"
+	var found bool
+	for _, c := range clauses {
+		if c == want {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected deferred clause %q in %v", want, clauses)
+	}
+	if len(args) != 1 || args[0] != types.StatusDeferred {
+		t.Fatalf("args = %v, want [%q]", args, types.StatusDeferred)
 	}
 }
 

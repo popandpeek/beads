@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -37,6 +38,9 @@ func init() {
 }
 
 func runReset(cmd *cobra.Command, args []string) {
+	if err := requireServerMode("reset"); err != nil {
+		FatalError("%v", err)
+	}
 	CheckReadonly("reset")
 
 	force, _ := cmd.Flags().GetBool("force")
@@ -54,9 +58,9 @@ func runReset(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	// Check if .beads directory exists
-	beadsDir := ".beads"
-	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
+	// Resolve .beads directory (worktree-aware)
+	beadsDir := beads.FindBeadsDir()
+	if beadsDir == "" {
 		if jsonOutput {
 			outputJSON(map[string]interface{}{
 				"message": "beads not initialized",

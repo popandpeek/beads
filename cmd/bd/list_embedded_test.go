@@ -22,11 +22,11 @@ func bdList(t *testing.T, bd, dir string, args ...string) string {
 	cmd := exec.Command(bd, fullArgs...)
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd list %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		t.Fatalf("bd list %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
-	return string(out)
+	return stdout.String()
 }
 
 // bdListJSON runs "bd list --json" and parses the result as an array of IssueWithCounts.
@@ -36,12 +36,12 @@ func bdListJSON(t *testing.T, bd, dir string, args ...string) []*types.IssueWith
 	cmd := exec.Command(bd, fullArgs...)
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd list --json %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		t.Fatalf("bd list --json %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
-	// Find the JSON array in the output (skip any non-JSON preamble)
-	s := string(out)
+	// Parse stdout only; hints/warnings (e.g. truncation) go to stderr (GH#3212).
+	s := stdout.String()
 	start := strings.Index(s, "[")
 	if start < 0 {
 		// Empty list returns "[]" or possibly "null"
@@ -55,6 +55,49 @@ func bdListJSON(t *testing.T, bd, dir string, args ...string) []*types.IssueWith
 		t.Fatalf("failed to parse JSON list output: %v\nraw: %s", err, s[start:])
 	}
 	return issues
+}
+
+type bdListSkipLabelsJSON struct {
+	SchemaVersion int `json:"schema_version"`
+	Issues        []struct {
+		ID     string   `json:"id"`
+		Labels []string `json:"labels"`
+	} `json:"issues"`
+	Meta struct {
+		SkipLabels bool `json:"skip_labels"`
+		Count      int  `json:"count"`
+	} `json:"meta"`
+}
+
+func bdListSkipLabelsJSONOutput(t *testing.T, bd, dir string, args ...string) bdListSkipLabelsJSON {
+	t.Helper()
+	fullArgs := append([]string{"list", "--json", "--skip-labels"}, args...)
+	cmd := exec.Command(bd, fullArgs...)
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd list --json --skip-labels %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
+	}
+	var out bdListSkipLabelsJSON
+	if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+		t.Fatalf("failed to parse skip-labels JSON output: %v\nraw: %s", err, stdout.String())
+	}
+	return out
+}
+
+// bdListCapture runs "bd list" and returns (stdout, stderr) separately.
+func bdListCapture(t *testing.T, bd, dir string, args ...string) (string, string) {
+	t.Helper()
+	fullArgs := append([]string{"list"}, args...)
+	cmd := exec.Command(bd, fullArgs...)
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd list %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
+	}
+	return stdout.String(), stderr.String()
 }
 
 // bdListFail runs "bd list" expecting failure.
@@ -184,6 +227,31 @@ func TestEmbeddedList(t *testing.T) {
 		}
 	})
 
+	t.Run("limit_truncation_hint", func(t *testing.T) {
+		// Truncated: --limit < seeded count should emit stderr hint (GH#3212).
+		stdout, stderr := bdListCapture(t, bd, dir, "--limit", "2")
+		if !strings.Contains(stderr, "more results matched") {
+			t.Errorf("expected truncation hint on stderr, got:\nstderr: %q\nstdout: %q", stderr, stdout)
+		}
+		// The hint must go to stderr only, not stdout, so JSON consumers can parse stdout cleanly.
+		if strings.Contains(stdout, "more results matched") {
+			t.Errorf("truncation hint leaked into stdout:\n%s", stdout)
+		}
+
+		// Not truncated: --limit 0 (unlimited) must not emit the hint.
+		_, stderrAll := bdListCapture(t, bd, dir, "--limit", "0")
+		if strings.Contains(stderrAll, "more results matched") {
+			t.Errorf("unexpected truncation hint with --limit 0:\n%s", stderrAll)
+		}
+
+		// Not truncated: exact count match (we seed 12 issues, closed ones excluded by default).
+		// Use a generous --limit that exceeds any default view.
+		_, stderrHigh := bdListCapture(t, bd, dir, "--limit", "1000")
+		if strings.Contains(stderrHigh, "more results matched") {
+			t.Errorf("false-positive truncation hint when under limit:\n%s", stderrHigh)
+		}
+	})
+
 	t.Run("id_filter", func(t *testing.T) {
 		idList := seed.openBug + "," + seed.readyTask
 		issues := bdListJSON(t, bd, dir, "--id", idList)
@@ -225,6 +293,46 @@ func TestEmbeddedList(t *testing.T) {
 		}
 	})
 
+	t.Run("exclude_label", func(t *testing.T) {
+		issues := bdListJSON(t, bd, dir, "--exclude-label", "urgent")
+		// openBug has labels: backend,urgent — should be excluded
+		if containsID(issues, seed.openBug) {
+			t.Error("openBug with 'urgent' label should be excluded by --exclude-label urgent")
+		}
+		// overdueTask also has label: urgent — should be excluded
+		if containsID(issues, seed.overdueTask) {
+			t.Error("overdueTask with 'urgent' label should be excluded by --exclude-label urgent")
+		}
+	})
+
+	t.Run("exclude_label_with_include", func(t *testing.T) {
+		// Include backend but exclude urgent — should get issues with backend but not urgent
+		issues := bdListJSON(t, bd, dir, "--label", "backend", "--exclude-label", "urgent")
+		// openBug has both backend and urgent — should be excluded
+		if containsID(issues, seed.openBug) {
+			t.Error("openBug with backend+urgent should be excluded when --exclude-label urgent")
+		}
+	})
+
+	t.Run("skip_labels_json_suppresses_labeled_issue", func(t *testing.T) {
+		out := bdListSkipLabelsJSONOutput(t, bd, dir, "--id", seed.openBug)
+		if !out.Meta.SkipLabels {
+			t.Fatal("expected meta.skip_labels=true")
+		}
+		if out.Meta.Count != 1 || len(out.Issues) != 1 {
+			t.Fatalf("expected one issue and matching count, got count=%d issues=%d", out.Meta.Count, len(out.Issues))
+		}
+		if out.Issues[0].ID != seed.openBug {
+			t.Fatalf("expected issue %s, got %s", seed.openBug, out.Issues[0].ID)
+		}
+		if out.Issues[0].Labels == nil {
+			t.Fatal("expected labels field to be present as an empty array, got nil")
+		}
+		if len(out.Issues[0].Labels) != 0 {
+			t.Fatalf("--skip-labels JSON leaked labels: %v", out.Issues[0].Labels)
+		}
+	})
+
 	// --- C. Status/special filtering ---
 	// Note: --ready, --pinned, --status closed/deferred/in_progress tests are
 	// skipped because bd update and bd close are not yet implemented on
@@ -240,6 +348,16 @@ func TestEmbeddedList(t *testing.T) {
 		// All seeded issues are open, so --ready should return most of them
 		if len(issues) == 0 {
 			t.Error("--ready should return open issues")
+		}
+	})
+
+	t.Run("ready_exclude_type", func(t *testing.T) {
+		issues := bdListJSON(t, bd, dir, "--ready", "--exclude-type", "epic", "--limit", "0")
+		if containsID(issues, seed.epic) {
+			t.Errorf("--ready --exclude-type epic should exclude epic %s, got %v", seed.epic, listIssueIDs(issues))
+		}
+		if !containsID(issues, seed.readyTask) {
+			t.Errorf("--ready --exclude-type epic should still include ready task %s, got %v", seed.readyTask, listIssueIDs(issues))
 		}
 	})
 
@@ -283,6 +401,60 @@ func TestEmbeddedList(t *testing.T) {
 		out := bdList(t, bd, dir, "--tree", "--parent", seed.epic)
 		if !strings.Contains(out, seed.epic) {
 			t.Errorf("tree output should contain parent ID %s", seed.epic)
+		}
+	})
+
+	t.Run("ready_parent_tree_excludes_blocked_descendants", func(t *testing.T) {
+		parent := bdCreate(t, bd, dir, "Ready parent tree", "--type", "epic")
+		readyChild := bdCreate(t, bd, dir, "Ready child in tree", "--type", "task", "--parent", parent.ID)
+		blockedChild := bdCreate(t, bd, dir, "Blocked child in tree", "--type", "task", "--parent", parent.ID)
+		blocker := bdCreate(t, bd, dir, "Tree child blocker", "--type", "task")
+		bdDepAdd(t, bd, dir, blockedChild.ID, blocker.ID)
+
+		out := bdList(t, bd, dir, "--ready", "--parent", parent.ID, "--no-pager")
+		if !strings.Contains(out, readyChild.ID) {
+			t.Errorf("ready child %s should appear in ready parent tree:\n%s", readyChild.ID, out)
+		}
+		if strings.Contains(out, blockedChild.ID) {
+			t.Errorf("blocked child %s should not appear in ready parent tree:\n%s", blockedChild.ID, out)
+		}
+	})
+
+	// Regression for gastownhall/beads#3936: relates-to between two epics
+	// must not nest them in `bd list` tree mode, and a bidirectional
+	// relates-to must not silently drop both epics from the output.
+	t.Run("tree_relates_to_does_not_nest_or_drop_epics", func(t *testing.T) {
+		epicA := bdCreate(t, bd, dir, "Relates Epic A", "--type", "epic", "--priority", "2")
+		epicB := bdCreate(t, bd, dir, "Relates Epic B", "--type", "epic", "--priority", "2")
+
+		bdDep(t, bd, dir, "add", epicA.ID, epicB.ID, "--type", "relates-to")
+		out := bdList(t, bd, dir, "--no-pager", "--type", "epic")
+		if !strings.Contains(out, epicA.ID) || !strings.Contains(out, epicB.ID) {
+			t.Fatalf("one-direction relates-to should keep both epics visible:\n%s", out)
+		}
+		if strings.Contains(out, "└── "+epicA.ID) || strings.Contains(out, "└── "+epicB.ID) ||
+			strings.Contains(out, "├── "+epicA.ID) || strings.Contains(out, "├── "+epicB.ID) {
+			t.Fatalf("relates-to must not nest epics under each other:\n%s", out)
+		}
+
+		bdDep(t, bd, dir, "add", epicB.ID, epicA.ID, "--type", "relates-to")
+		out = bdList(t, bd, dir, "--no-pager", "--type", "epic")
+		if !strings.Contains(out, epicA.ID) || !strings.Contains(out, epicB.ID) {
+			t.Fatalf("bidirectional relates-to must not drop epics from tree output:\n%s", out)
+		}
+	})
+
+	t.Run("ready_parent_filter_includes_grandchildren", func(t *testing.T) {
+		parent := bdCreate(t, bd, dir, "Ready parent recursive", "--type", "epic")
+		child := bdCreate(t, bd, dir, "Ready child recursive", "--type", "task", "--parent", parent.ID)
+		grandchild := bdCreate(t, bd, dir, "Ready grandchild recursive", "--type", "task", "--parent", child.ID)
+
+		issues := bdListJSON(t, bd, dir, "--ready", "--parent", parent.ID, "--limit", "0")
+		if !containsID(issues, child.ID) {
+			t.Errorf("ready parent filter should include direct child %s, got %v", child.ID, listIssueIDs(issues))
+		}
+		if !containsID(issues, grandchild.ID) {
+			t.Errorf("ready parent filter should include recursive grandchild %s, got %v", grandchild.ID, listIssueIDs(issues))
 		}
 	})
 
@@ -426,6 +598,9 @@ func TestEmbeddedList(t *testing.T) {
 		out := bdList(t, bd, dir, "--long", "--flat")
 		if !strings.Contains(out, "Found") {
 			t.Error("--long format should contain 'Found N issues'")
+		}
+		if !strings.Contains(out, "Description:") || !strings.Contains(out, "This is a bug") {
+			t.Errorf("--long format should include issue descriptions, got: %s", out)
 		}
 	})
 
@@ -637,10 +812,7 @@ func TestEmbeddedListConcurrent(t *testing.T) {
 			for i := 0; i < issuesPerWorker; i++ {
 				// Create
 				title := fmt.Sprintf("w%d-issue-%d", worker, i)
-				cmd := exec.Command(bd, "create", "--silent", title)
-				cmd.Dir = dir
-				cmd.Env = bdEnv(dir)
-				out, err := cmd.CombinedOutput()
+				out, err := bdRunWithFlockRetry(t, bd, dir, "create", "--silent", title)
 				if err != nil {
 					r.err = fmt.Errorf("create %d: %v\n%s", i, err, out)
 					results[worker] = r
@@ -658,14 +830,14 @@ func TestEmbeddedListConcurrent(t *testing.T) {
 				listCmd := exec.Command(bd, "list", "--json", "--limit", "0")
 				listCmd.Dir = dir
 				listCmd.Env = bdEnv(dir)
-				listOut, err := listCmd.CombinedOutput()
+				listStdout, listStderr, err := runCommandBuffers(t, listCmd)
 				if err != nil {
-					r.err = fmt.Errorf("list after create %d: %v\n%s", i, err, listOut)
+					r.err = fmt.Errorf("list after create %d: %v\nstdout:\n%s\nstderr:\n%s", i, err, listStdout.String(), listStderr.String())
 					results[worker] = r
 					return
 				}
 				// Parse JSON array to count issues
-				s := string(listOut)
+				s := listStdout.String()
 				start := strings.Index(s, "[")
 				if start < 0 {
 					r.listCounts = append(r.listCounts, 0)
@@ -673,7 +845,7 @@ func TestEmbeddedListConcurrent(t *testing.T) {
 				}
 				var issues []json.RawMessage
 				if jsonErr := json.Unmarshal([]byte(s[start:]), &issues); jsonErr != nil {
-					r.err = fmt.Errorf("list parse after create %d: %v\nraw: %s", i, jsonErr, s)
+					r.err = fmt.Errorf("list parse after create %d: %v\nstdout:\n%s\nstderr:\n%s", i, jsonErr, s, listStderr.String())
 					results[worker] = r
 					return
 				}
@@ -687,13 +859,15 @@ func TestEmbeddedListConcurrent(t *testing.T) {
 
 	// Collect all created IDs and check for errors.
 	allIDs := make(map[string]bool)
-	var failures int
+	var successes int
 	for _, r := range results {
 		if r.err != nil {
-			t.Errorf("worker %d failed: %v", r.worker, r.err)
-			failures++
+			if !strings.Contains(r.err.Error(), "one writer at a time") {
+				t.Errorf("worker %d failed: %v", r.worker, r.err)
+			}
 			continue
 		}
+		successes++
 		for _, id := range r.createIDs {
 			if allIDs[id] {
 				t.Errorf("duplicate ID %q from worker %d", id, r.worker)
@@ -702,12 +876,12 @@ func TestEmbeddedListConcurrent(t *testing.T) {
 		}
 	}
 
-	totalExpected := numWorkers * issuesPerWorker
-	if failures > 0 {
-		t.Fatalf("%d/%d workers failed", failures, numWorkers)
+	if successes == 0 {
+		t.Fatal("all workers failed — expected at least 1 success")
 	}
-	if len(allIDs) != totalExpected {
-		t.Errorf("expected %d unique IDs, got %d", totalExpected, len(allIDs))
+	expectedIDs := successes * issuesPerWorker
+	if len(allIDs) != expectedIDs {
+		t.Errorf("expected %d unique IDs from %d successful workers, got %d", expectedIDs, successes, len(allIDs))
 	}
 
 	// Verify list counts were monotonically non-decreasing within each worker
@@ -739,9 +913,9 @@ func TestEmbeddedListConcurrent(t *testing.T) {
 	}
 	if missing > 0 {
 		t.Errorf("%d/%d created issues missing from final list (%d total in list)",
-			missing, totalExpected, len(finalIssues))
+			missing, len(allIDs), len(finalIssues))
 	}
 
-	t.Logf("concurrency test: %d workers × %d issues = %d total, %d in final list",
-		numWorkers, issuesPerWorker, totalExpected, len(finalIssues))
+	t.Logf("concurrency test: %d/%d workers succeeded, %d IDs created, %d in final list",
+		successes, numWorkers, len(allIDs), len(finalIssues))
 }

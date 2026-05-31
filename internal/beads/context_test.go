@@ -971,9 +971,6 @@ func TestGitOutput(t *testing.T) {
 // TestGitCmd_WorktreeContext tests that GitCmd correctly operates on the main repo
 // even when running from a git worktree context (GH#2538).
 func TestGitCmd_WorktreeContext(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
 
 	t.Cleanup(func() {
 		ResetCaches()
@@ -1047,7 +1044,7 @@ func TestGitCmd_WorktreeContext(t *testing.T) {
 		t.Fatalf("failed to get relative path: %v", err)
 	}
 
-	addCmd := rc.GitCmd(ctx, "add", relPath)
+	addCmd := rc.GitCmd(ctx, "add", "-f", relPath)
 	addOutput, err := addCmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("GitCmd git add failed: %v\nOutput: %s", err, addOutput)

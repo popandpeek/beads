@@ -35,6 +35,16 @@ func TestValidateIssueClosable(t *testing.T) {
 	if err := validateIssueClosable("bd-2", &types.Issue{Status: types.StatusPinned}, true); err != nil {
 		t.Fatalf("expected pinned close to succeed with force, got %v", err)
 	}
+	// Polecat in_review guard
+	if err := validateIssueClosable("bd-3", &types.Issue{Status: "in_review", Assignee: "beacon/polecats/quartz"}, false); err == nil {
+		t.Fatalf("expected polecat in_review close to be blocked")
+	}
+	if err := validateIssueClosable("bd-3", &types.Issue{Status: "in_review", Assignee: "beacon/polecats/quartz"}, true); err != nil {
+		t.Fatalf("expected polecat in_review close to succeed with force, got %v", err)
+	}
+	if err := validateIssueClosable("bd-4", &types.Issue{Status: "in_review", Assignee: "beacon/crew/emmett"}, false); err != nil {
+		t.Fatalf("expected non-polecat in_review close to succeed, got %v", err)
+	}
 }
 
 func TestApplyLabelUpdates_SetAddRemove(t *testing.T) {

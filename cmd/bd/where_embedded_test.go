@@ -19,11 +19,72 @@ func bdWhere(t *testing.T, bd, dir string, args ...string) string {
 	cmd := exec.Command(bd, fullArgs...)
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd where %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		t.Fatalf("bd where %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
-	return string(out)
+	return stdout.String()
+}
+
+func bdWhereAllowError(t *testing.T, bd, dir string, args ...string) (string, error) {
+	t.Helper()
+	fullArgs := append([]string{"where"}, args...)
+	cmd := exec.Command(bd, fullArgs...)
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+func TestWhereNoWorkspace(t *testing.T) {
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir := t.TempDir()
+
+	t.Run("default_output", func(t *testing.T) {
+		out, err := bdWhereAllowError(t, bd, dir)
+		if err == nil {
+			t.Fatal("expected bd where to exit non-zero without a workspace")
+		}
+		if !strings.Contains(out, activeWorkspaceNotFoundMessage()) {
+			t.Fatalf("expected no-workspace message, got: %s", out)
+		}
+		if strings.Contains(out, "no beads database found") {
+			t.Fatalf("where should report workspace resolution failure, not database init failure: %s", out)
+		}
+	})
+
+	t.Run("json_output", func(t *testing.T) {
+		out, err := bdWhereAllowError(t, bd, dir, "--json")
+		if err == nil {
+			t.Fatal("expected bd where --json to exit non-zero without a workspace")
+		}
+
+		s := strings.TrimSpace(out)
+		start := strings.Index(s, "{")
+		if start < 0 {
+			t.Fatalf("expected JSON object in output, got: %s", out)
+		}
+
+		var payload map[string]interface{}
+		if err := json.Unmarshal([]byte(s[start:]), &payload); err != nil {
+			t.Fatalf("parse where JSON: %v\n%s", err, s)
+		}
+		if errField, _ := payload["error"].(string); errField != "no_beads_directory" {
+			t.Fatalf("error = %q, want %q", errField, "no_beads_directory")
+		}
+		if message, _ := payload["message"].(string); message != activeWorkspaceNotFoundMessage() {
+			t.Fatalf("message = %q, want %q", message, activeWorkspaceNotFoundMessage())
+		}
+		hint, _ := payload["hint"].(string)
+		if !strings.Contains(hint, "BEADS_DIR/worktree setup") {
+			t.Fatalf("hint should mention workspace diagnostics, got: %q", hint)
+		}
+		if !strings.Contains(hint, "bd init") {
+			t.Fatalf("hint should mention bd init, got: %q", hint)
+		}
+	})
 }
 
 func TestEmbeddedWhere(t *testing.T) {
@@ -71,6 +132,11 @@ func TestEmbeddedWhere(t *testing.T) {
 			if p, ok := path.(string); ok && !strings.Contains(p, ".beads") {
 				t.Errorf("expected .beads in path: %v", path)
 			}
+		}
+		if prefix, ok := m["prefix"]; !ok {
+			t.Fatalf("expected prefix in where --json output: %s", out)
+		} else if p, ok := prefix.(string); !ok || p != "tw" {
+			t.Fatalf("expected prefix %q in where --json output, got %#v", "tw", prefix)
 		}
 	})
 }
@@ -122,7 +188,7 @@ func TestEmbeddedWhereConcurrent(t *testing.T) {
 	wg.Wait()
 
 	for _, r := range results {
-		if r.err != nil {
+		if r.err != nil && !strings.Contains(r.err.Error(), "one writer at a time") {
 			t.Errorf("worker %d failed: %v", r.worker, r.err)
 		}
 	}

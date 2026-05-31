@@ -91,6 +91,7 @@ Examples:
 		if err := store.SetConfig(ctx, storageKey, insight); err != nil {
 			FatalErrorRespectJSON("storing memory: %v", err)
 		}
+		commandDidWrite.Store(true)
 
 		if jsonOutput {
 			outputJSON(map[string]string{
@@ -230,6 +231,7 @@ Examples:
 		if err := store.DeleteConfig(ctx, storageKey); err != nil {
 			FatalErrorRespectJSON("forgetting memory: %v", err)
 		}
+		commandDidWrite.Store(true)
 
 		if jsonOutput {
 			outputJSON(map[string]string{

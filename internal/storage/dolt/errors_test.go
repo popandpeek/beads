@@ -100,15 +100,15 @@ func TestDatabaseNotFoundHint(t *testing.T) {
 		ServerPort: 3309,
 	}
 
-	t.Run("hint suggests setting sync.git-remote when empty", func(t *testing.T) {
-		cfg := baseCfg // SyncGitRemote is empty by default
+	t.Run("hint suggests setting sync.remote when empty", func(t *testing.T) {
+		cfg := baseCfg // SyncRemote is empty by default
 		err := databaseNotFoundError(&cfg)
 
 		msg := err.Error()
 
 		// FR-001: Must contain the setup hint (line-wrapped in output)
-		if !strings.Contains(msg, "set sync.git-remote") {
-			t.Errorf("expected hint to set sync.git-remote, got:\n%s", msg)
+		if !strings.Contains(msg, "set sync.remote") {
+			t.Errorf("expected hint to set sync.remote, got:\n%s", msg)
 		}
 		if !strings.Contains(msg, ".beads/config.yaml") {
 			t.Errorf("expected .beads/config.yaml reference, got:\n%s", msg)
@@ -134,15 +134,15 @@ func TestDatabaseNotFoundHint(t *testing.T) {
 		}
 	})
 
-	t.Run("hint mentions configured sync.git-remote when set", func(t *testing.T) {
+	t.Run("hint mentions configured sync.remote when set", func(t *testing.T) {
 		cfg := baseCfg
-		cfg.SyncGitRemote = "https://doltremoteapi.dolthub.com/myorg/beads"
+		cfg.SyncRemote = "https://doltremoteapi.dolthub.com/myorg/beads"
 		err := databaseNotFoundError(&cfg)
 
 		msg := err.Error()
 
 		// FR-002: Must mention it's configured and show the URL
-		if !strings.Contains(msg, "sync.git-remote is configured") {
+		if !strings.Contains(msg, "sync.remote is configured") {
 			t.Errorf("expected configured hint, got:\n%s", msg)
 		}
 		if !strings.Contains(msg, "https://doltremoteapi.dolthub.com/myorg/beads") {
@@ -246,6 +246,29 @@ func TestHasBackupFiles(t *testing.T) {
 		}
 		if !HasBackupFiles(tmpDir) {
 			t.Error("expected true when jsonl files present")
+		}
+	})
+}
+
+func TestIsBranchTrackingError(t *testing.T) {
+	t.Parallel()
+
+	t.Run("matches dolt branch tracking error", func(t *testing.T) {
+		err := fmt.Errorf("Error 1105: You asked to pull from the remote 'origin', but did not specify a branch. Because this is not the default configured remote for your current branch, you must specify a branch.")
+		if !isBranchTrackingError(err) {
+			t.Error("expected true for branch tracking error")
+		}
+	})
+
+	t.Run("does not match unrelated errors", func(t *testing.T) {
+		if isBranchTrackingError(fmt.Errorf("connection refused")) {
+			t.Error("expected false for connection error")
+		}
+	})
+
+	t.Run("nil error returns false", func(t *testing.T) {
+		if isBranchTrackingError(nil) {
+			t.Error("expected false for nil error")
 		}
 	})
 }

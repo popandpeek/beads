@@ -11,6 +11,7 @@ import (
 	mysql "github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dberrors"
 )
 
 // Sentinel errors for the dolt storage layer.
@@ -28,6 +29,12 @@ var (
 
 	// ErrExec indicates a database exec (INSERT/UPDATE/DELETE) failure.
 	ErrExec = errors.New("exec error")
+
+	// ErrDanglingReference indicates that the pre-push integrity check detected
+	// missing chunks in the local Dolt noms store. The push was aborted to
+	// prevent propagating the corruption to the remote. Run bd dolt verify
+	// to diagnose and recover.
+	ErrDanglingReference = errors.New("dangling chunk reference")
 )
 
 // isTableNotExistError returns true if the error indicates a MySQL/Dolt
@@ -35,8 +42,16 @@ var (
 // fallthrough (pre-migration databases without wisps table) from real errors
 // (timeouts, connection failures, corrupt data).
 func isTableNotExistError(err error) bool {
-	var mysqlErr *mysql.MySQLError
-	return errors.As(err, &mysqlErr) && mysqlErr.Number == 1146
+	return dberrors.IsTableNotExist(err)
+}
+
+// isBranchTrackingError returns true if the error indicates that DOLT_PULL
+// failed because upstream branch tracking is not configured. This happens
+// when a remote was added via DOLT_REMOTE('add') or bd dolt remote add
+// rather than via dolt clone / bd bootstrap, leaving repo_state.json with
+// an empty "branches" map (GH#3144).
+func isBranchTrackingError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "did not specify a branch")
 }
 
 // isSerializationError returns true if the error is a Dolt/MySQL serialization
@@ -97,7 +112,7 @@ func wrapExecError(op string, err error) error {
 }
 
 // databaseNotFoundError builds the "database not found" error with a config-aware
-// hint about sync.git-remote and backup recovery. Extracted from openServerConnection
+// hint about sync.remote and backup recovery. Extracted from openServerConnection
 // for testability.
 func databaseNotFoundError(cfg *Config) error {
 	var b strings.Builder
@@ -123,11 +138,11 @@ func databaseNotFoundError(cfg *Config) error {
 	b.WriteString("  bd doctor                  # Check server and database health\n")
 	b.WriteString("  bd dolt status             # Show which data directory the server is using")
 
-	if cfg.SyncGitRemote != "" {
-		fmt.Fprintf(&b, "\n\nTip: sync.git-remote is configured (%s).\nRun bd bootstrap to recover from the remote or confirm what bootstrap will do with --dry-run.", cfg.SyncGitRemote)
+	if cfg.SyncRemote != "" {
+		fmt.Fprintf(&b, "\n\nTip: sync.remote is configured (%s).\nRun bd bootstrap to recover from the remote or confirm what bootstrap will do with --dry-run.", cfg.SyncRemote)
 	} else {
 		b.WriteString("\n\nTip: If this is an existing project, fresh clone, or shared-server recovery, run bd bootstrap first.\n")
-		b.WriteString("If bootstrap cannot find the expected remote automatically, set sync.git-remote\nin .beads/config.yaml and re-run bd bootstrap.\n")
+		b.WriteString("If bootstrap cannot find the expected remote automatically, set sync.remote\nin .beads/config.yaml and re-run bd bootstrap.\n")
 		b.WriteString("Use bd bootstrap --dry-run if you need to confirm the plan before it initializes anything.\n")
 		b.WriteString("Use bd init only when creating a brand-new project with no existing .beads data.")
 	}

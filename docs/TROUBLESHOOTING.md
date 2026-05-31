@@ -135,8 +135,8 @@ go list -f {{.Target}} github.com/steveyegge/beads/cmd/bd
 # Add Go bin to PATH (add to ~/.bashrc or ~/.zshrc)
 export PATH="$PATH:$(go env GOPATH)/bin"
 
-# Or reinstall
-go install github.com/steveyegge/beads/cmd/bd@latest
+# Or reinstall with the recommended installer
+curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash
 ```
 
 ### Wrong version of bd running / Multiple bd binaries in PATH
@@ -176,17 +176,17 @@ Some users report crashes when running `bd init` or other commands on macOS. Thi
 
 **Workaround:**
 ```bash
-# Build with CGO enabled
-CGO_ENABLED=1 go install github.com/steveyegge/beads/cmd/bd@latest
+# Install an embedded-capable build
+CGO_ENABLED=1 GOFLAGS=-tags=gms_pure_go go install github.com/steveyegge/beads/cmd/bd@latest
 
 # Or if building from source
-git clone https://github.com/steveyegge/beads
+git clone https://github.com/gastownhall/beads
 cd beads
-CGO_ENABLED=1 go build -o bd ./cmd/bd
+CGO_ENABLED=1 go build -tags gms_pure_go -o bd ./cmd/bd
 sudo mv bd /usr/local/bin/
 ```
 
-If you installed via Homebrew, this shouldn't be necessary as the formula already enables CGO. If you're still seeing crashes with the Homebrew version, please [file an issue](https://github.com/steveyegge/beads/issues).
+If you installed via Homebrew, this shouldn't be necessary as the formula already enables CGO. If you're still seeing crashes with the Homebrew version, please [file an issue](https://github.com/gastownhall/beads/issues).
 
 ## Antivirus False Positives
 
@@ -210,7 +210,7 @@ If you installed via Homebrew, this shouldn't be necessary as the formula alread
    # macOS/Linux
    shasum -a 256 bd
    ```
-   Compare with checksums from the [GitHub release page](https://github.com/steveyegge/beads/releases)
+   Compare with checksums from the [GitHub release page](https://github.com/gastownhall/beads/releases)
 
 2. **Add bd to antivirus exclusions only after verification**:
    - Add the bd installation directory to your antivirus exclusion list
@@ -299,6 +299,32 @@ dolt sql-server --host 127.0.0.1 --port 3307 --data-dir /path/to/your/dolt/data
 ```
 
 If you want auto-start behavior, remove `dolt_server_port` from `.beads/metadata.json`.
+
+### Dolt journal corruption after restart
+
+**Symptom:** After a system restart, `bd` reports that the Dolt server started
+but is not accepting connections, and `.beads/dolt-server.log` contains:
+
+```text
+possible data loss detected in journal file at offset ...: corrupted journal
+```
+
+**Cause:** Dolt detected damaged journal blocks after an unclean shutdown. This
+is not the same as a stale PID, stale port, or stale lock file. `bd` will not
+run Dolt's data-loss repair mode automatically.
+
+**Safe recovery when your remote is current:**
+
+```bash
+mv .beads/dolt .beads/dolt.corrupt.$(date +%Y%m%dT%H%M%S)
+bd bootstrap --dry-run
+bd bootstrap --yes
+bd stats
+```
+
+If the remote may be stale, keep the corrupt directory for forensics and inspect
+it with `dolt fsck` before considering `dolt fsck --revive-journal-with-data-loss`.
+Only use the revive path after reviewing Dolt's data-loss warning.
 
 ### `database is locked`
 
@@ -433,9 +459,9 @@ bd init
 bd config set sync.branch ""  # Disable sync branch feature
 ```
 
-**Note:** The `--hard` and `--skip-init` flags mentioned in [GH#479](https://github.com/steveyegge/beads/issues/479) were never implemented. Use the workarounds above for a complete reset.
+**Note:** The `--hard` and `--skip-init` flags mentioned in [GH#479](https://github.com/gastownhall/beads/issues/479) were never implemented. Use the workarounds above for a complete reset.
 
-**Related:** [GH#922](https://github.com/steveyegge/beads/issues/922)
+**Related:** [GH#922](https://github.com/gastownhall/beads/issues/922)
 
 ### Database corruption
 
@@ -497,7 +523,7 @@ This means bd found multiple `.beads` directories in your directory hierarchy. T
 
 2. **If you have accidental duplicates** (unintentional):
    - Decide which database to keep
-   - Export issues from the unwanted database: `cd <unwanted-dir> && bd export -o backup.jsonl`
+   - Export issues from the unwanted database: `cd <unwanted-dir> && bd export -o issue-export.jsonl`
    - Remove the unwanted `.beads` directory: `rm -rf <unwanted-dir>/.beads`
    - Optionally import issues into the main database if needed
 
@@ -613,6 +639,41 @@ chmod +x .git/hooks/post-merge
 chmod +x .git/hooks/post-checkout
 ```
 
+### Corrupted symlinked `CLAUDE.md`
+
+**Symptom:** Git reports `CLAUDE.md` as a symlink entry (`mode 120000`), but
+the indexed blob contains multi-line Markdown instead of a one-line symlink
+target. On macOS this can make clones or checkouts fail because symlink targets
+cannot contain newline-separated Markdown content.
+
+This affects repositories that were already corrupted by older setup behavior.
+The setup bug has been fixed ([#4192](https://github.com/gastownhall/beads/pull/4192));
+the recipe below repairs an existing bad Git index entry.
+
+**Confirm the bad entry:**
+
+```bash
+git ls-files -s CLAUDE.md
+git cat-file -p :CLAUDE.md | sed -n '1,5p'
+```
+
+If `git ls-files -s` starts with `120000` and `git cat-file` prints Markdown,
+convert the existing blob to a regular tracked file without changing its
+content:
+
+```bash
+sha=$(git rev-parse :CLAUDE.md)
+git update-index --cacheinfo 100644,$sha,CLAUDE.md
+git checkout-index -f -- CLAUDE.md
+
+# Verify that the index now records a normal file.
+git ls-files -s CLAUDE.md
+git diff -- CLAUDE.md
+```
+
+Commit the mode repair after review. The first column from `git ls-files -s`
+should now be `100644`.
+
 ### "Branch already checked out" when switching branches
 
 **Symptom:**
@@ -660,7 +721,7 @@ git worktree prune
 
 See [WORKTREES.md](WORKTREES.md) for details on how beads uses worktrees.
 
-### Auto-sync not working
+### Dolt remote sync not working
 
 Check if Dolt server is running and configured:
 
@@ -673,7 +734,7 @@ bd dolt push
 bd dolt pull
 
 # Check sync configuration
-bd config get sync.git-remote
+bd config get sync.remote
 ```
 
 ## Ready Work and Dependencies
@@ -922,12 +983,12 @@ bd dolt push
 
 | Flag | Purpose | When to use | Risk |
 |------|---------|-------------|------|
-| `--sandbox` | Use embedded mode, disable auto-sync | Sandboxed environments (Codex, containers) | Low - safe for sandboxes |
+| `--sandbox` | Use embedded mode, disable Dolt auto-push | Sandboxed environments (Codex, containers) | Low - safe for sandboxes |
 | `bd doctor --fix` | Force metadata update | Stuck staleness loop | Low - updates metadata only |
 
 **Related:**
 - See [Claude Code sandboxing documentation](https://www.anthropic.com/engineering/claude-code-sandboxing) for more about sandbox restrictions
-- GitHub issue [#353](https://github.com/steveyegge/beads/issues/353) for background
+- GitHub issue [#353](https://github.com/gastownhall/beads/issues/353) for background
 
 ## Platform-Specific Issues
 
@@ -1014,14 +1075,14 @@ export PATH="$HOME/.local/bin:$PATH"
 
 If none of these solutions work:
 
-1. **Check existing issues**: [GitHub Issues](https://github.com/steveyegge/beads/issues)
+1. **Check existing issues**: [GitHub Issues](https://github.com/gastownhall/beads/issues)
 2. **Enable debug logging**: `bd --verbose <command>`
 3. **File a bug report**: Include:
    - bd version: `bd version`
    - OS and architecture: `uname -a`
    - Error message and full command
    - Steps to reproduce
-4. **Join discussions**: [GitHub Discussions](https://github.com/steveyegge/beads/discussions)
+4. **Join discussions**: [GitHub Discussions](https://github.com/gastownhall/beads/discussions)
 
 ## Related Documentation
 

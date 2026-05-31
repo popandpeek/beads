@@ -21,11 +21,11 @@ func TestEmbeddedVersion(t *testing.T) {
 
 	t.Run("version_output", func(t *testing.T) {
 		cmd := exec.Command(bd, "version")
-		out, err := cmd.CombinedOutput()
+		stdout, stderr, err := runCommandBuffers(t, cmd)
 		if err != nil {
-			t.Fatalf("bd version failed: %v\n%s", err, out)
+			t.Fatalf("bd version failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 		}
-		s := string(out)
+		s := stdout.String()
 		if len(strings.TrimSpace(s)) == 0 {
 			t.Error("expected non-empty version output")
 		}
@@ -67,7 +67,7 @@ func TestEmbeddedVersionConcurrent(t *testing.T) {
 	}
 	wg.Wait()
 	for _, r := range results {
-		if r.err != nil {
+		if r.err != nil && !strings.Contains(r.err.Error(), "one writer at a time") {
 			t.Errorf("worker %d failed: %v", r.worker, r.err)
 		}
 	}

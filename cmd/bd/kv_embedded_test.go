@@ -19,11 +19,11 @@ func bdKV(t *testing.T, bd, dir string, args ...string) string {
 	cmd := exec.Command(bd, fullArgs...)
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd kv %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		t.Fatalf("bd kv %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
-	return string(out)
+	return stdout.String()
 }
 
 // bdKVFail runs "bd kv" expecting failure.
@@ -46,19 +46,27 @@ func bdKVListJSON(t *testing.T, bd, dir string) map[string]string {
 	cmd := exec.Command(bd, "kv", "list", "--json")
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd kv list --json failed: %v\n%s", err, out)
+		t.Fatalf("bd kv list --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 	}
-	s := strings.TrimSpace(string(out))
+	s := strings.TrimSpace(stdout.String())
 	start := strings.Index(s, "{")
 	if start < 0 {
-		// Empty KV store may return empty object or nothing
 		return map[string]string{}
 	}
-	var m map[string]string
-	if err := json.Unmarshal([]byte(s[start:]), &m); err != nil {
+	var raw map[string]interface{}
+	if err := json.Unmarshal([]byte(s[start:]), &raw); err != nil {
 		t.Fatalf("parse kv list JSON: %v\n%s", err, s)
+	}
+	m := make(map[string]string, len(raw))
+	for k, v := range raw {
+		if k == "schema_version" {
+			continue
+		}
+		if sv, ok := v.(string); ok {
+			m[k] = sv
+		}
 	}
 	return m
 }
@@ -238,14 +246,21 @@ func TestEmbeddedKVConcurrent(t *testing.T) {
 	wg.Wait()
 
 	for _, r := range results {
-		if r.err != nil {
+		if r.err != nil && !strings.Contains(r.err.Error(), "one writer at a time") {
 			t.Errorf("worker %d failed: %v", r.worker, r.err)
 		}
 	}
 
-	// Verify remaining keys (k1-k4 for each worker, k0 was cleared)
+	// Verify remaining keys only for workers that succeeded (err==nil).
+	// With exclusive flock, some workers may fail with "one writer at a time".
 	m := bdKVListJSON(t, bd, dir)
-	for w := 0; w < numWorkers; w++ {
+	var successCount int
+	for _, r := range results {
+		if r.err != nil {
+			continue
+		}
+		successCount++
+		w := r.worker
 		clearedKey := fmt.Sprintf("w%d-k0", w)
 		if _, ok := m[clearedKey]; ok {
 			t.Errorf("expected %s to be cleared", clearedKey)
@@ -257,5 +272,8 @@ func TestEmbeddedKVConcurrent(t *testing.T) {
 				t.Errorf("key %s expected %q, got %q (exists=%v)", key, expected, v, ok)
 			}
 		}
+	}
+	if successCount == 0 {
+		t.Fatal("expected at least 1 worker to succeed")
 	}
 }

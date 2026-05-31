@@ -6,28 +6,22 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
 	"path/filepath"
-	"strconv"
 	"testing"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/testutil"
 	"github.com/steveyegge/beads/internal/types"
 )
 
 // doctorTestServerPort returns the Dolt server port for doctor tests.
-// Returns 0 when BEADS_DOLT_PORT is unset so callers fail safely
-// instead of accidentally connecting to a production server on 3307.
+// Uses DoltContainerPortInt so the port is only non-zero when TestMain
+// actually started a container, ignoring any external BEADS_DOLT_PORT.
 func doctorTestServerPort() int {
-	if p := os.Getenv("BEADS_DOLT_PORT"); p != "" {
-		if port, _ := strconv.Atoi(p); port > 0 {
-			return port
-		}
-	}
-	return 0 // no test server available; sentinel triggers applyConfigDefaults safety guard
+	return testutil.DoltContainerPortInt()
 }
 
 // newTestDoltStore creates a DoltStore for testing in the doctor package.
@@ -60,13 +54,6 @@ func newTestDoltStore(t *testing.T, prefix string) *dolt.DoltStore {
 	// Create isolated branch for this test on the store's own connection
 	_, branchCleanup := testutil.StartTestBranch(t, store.DB(), testSharedDB)
 
-	// Create ignored tables on this branch
-	if err := dolt.CreateIgnoredTables(store.DB()); err != nil {
-		branchCleanup()
-		store.Close()
-		t.Fatalf("CreateIgnoredTables: %v", err)
-	}
-
 	// Set prefix for this test (overrides the shared schema's default)
 	if err := store.SetConfig(ctx, "issue_prefix", prefix); err != nil {
 		branchCleanup()
@@ -83,7 +70,7 @@ func newTestDoltStore(t *testing.T, prefix string) *dolt.DoltStore {
 
 // dropDoctorTestDatabase drops a test database (best-effort cleanup).
 func dropDoctorTestDatabase(dbName string, port int) {
-	dsn := fmt.Sprintf("root@tcp(127.0.0.1:%d)/?parseTime=true&timeout=5s", port)
+	dsn := doltutil.ServerDSN{Host: "127.0.0.1", Port: port, User: "root"}.String()
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		return

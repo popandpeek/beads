@@ -46,8 +46,20 @@ func findPIDOnPort(port int) int {
 // listDoltProcessPIDs returns PIDs of all running dolt sql-server processes.
 // Excludes zombies and defunct processes. Callers derive count (len) and
 // membership (linear scan) from the returned slice.
+//
+// The pgrep pattern uses `dolt.*sql-server` rather than the literal
+// `dolt sql-server` so it still matches when top-level dolt flags appear
+// between the binary name and the subcommand — e.g. debug mode launches
+// the server as `dolt --prof cpu --prof-path /…/dolt-pprof sql-server …`,
+// in which `dolt sql-server` no longer appears as a contiguous substring.
+// Without this, IsRunning's isDoltProcess check would reject the PID as
+// "not a dolt process" and wipe the PID/port files of a healthy server,
+// breaking `bd dolt status` and auto-start reattachment. The per-PID
+// substring check below still requires both "dolt" and "sql-server" in
+// the cmdline, so this only widens the first-stage filter; it does not
+// loosen identity validation.
 func listDoltProcessPIDs() []int {
-	out, err := exec.Command("pgrep", "-f", "dolt sql-server").Output()
+	out, err := exec.Command("pgrep", "-f", "dolt.*sql-server").Output()
 	if err != nil {
 		return nil
 	}
@@ -83,7 +95,9 @@ func listDoltProcessPIDs() []int {
 // Uses lsof to look up the CWD, which is more reliable than checking command-line
 // args since dolt sql-server is started with cmd.Dir (not a --data-dir flag).
 func isProcessInDir(pid int, dir string) bool {
-	out, err := exec.Command("lsof", "-p", strconv.Itoa(pid), "-d", "cwd", "-Fn").Output()
+	// On macOS, lsof requires -a to AND selectors together; without it,
+	// "-p <pid>" and "-d cwd" can yield cwd entries from unrelated processes.
+	out, err := exec.Command("lsof", "-a", "-p", strconv.Itoa(pid), "-d", "cwd", "-Fn").Output()
 	if err != nil {
 		return false
 	}
