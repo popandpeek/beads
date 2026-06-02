@@ -189,10 +189,12 @@ func (s *DoltStore) UpdateIssue(ctx context.Context, id string, updates map[stri
 	for _, table := range []string{"issues", "events"} {
 		_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
 	}
-	commitMsg := fmt.Sprintf("bd: update %s", id)
-	if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-		commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-		return fmt.Errorf("dolt commit: %w", err)
+	if staged, err := issueops.HasStagedChanges(ctx, tx); err == nil && staged {
+		commitMsg := fmt.Sprintf("bd: update %s", id)
+		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
+			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
+			return fmt.Errorf("dolt commit: %w", err)
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -228,10 +230,12 @@ func (s *DoltStore) ClaimIssue(ctx context.Context, id string, actor string) err
 	for _, table := range []string{"issues", "events"} {
 		_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
 	}
-	commitMsg := fmt.Sprintf("bd: claim %s", id)
-	if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-		commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-		return fmt.Errorf("dolt commit: %w", err)
+	if staged, err := issueops.HasStagedChanges(ctx, tx); err == nil && staged {
+		commitMsg := fmt.Sprintf("bd: claim %s", id)
+		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
+			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
+			return fmt.Errorf("dolt commit: %w", err)
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -259,10 +263,12 @@ func (s *DoltStore) ClaimReadyIssue(ctx context.Context, filter types.WorkFilter
 	for _, table := range []string{"issues", "events"} {
 		_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
 	}
-	commitMsg := fmt.Sprintf("bd: claim ready %s", claimed.ID)
-	if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-		commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-		return nil, fmt.Errorf("dolt commit: %w", err)
+	if staged, err := issueops.HasStagedChanges(ctx, tx); err == nil && staged {
+		commitMsg := fmt.Sprintf("bd: claim ready %s", claimed.ID)
+		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
+			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
+			return nil, fmt.Errorf("dolt commit: %w", err)
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -321,10 +327,12 @@ func (s *DoltStore) CloseIssue(ctx context.Context, id string, reason string, ac
 	for _, table := range []string{"issues", "events"} {
 		_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
 	}
-	commitMsg := fmt.Sprintf("bd: close %s", id)
-	if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-		commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-		return fmt.Errorf("dolt commit: %w", err)
+	if staged, err := issueops.HasStagedChanges(ctx, tx); err == nil && staged {
+		commitMsg := fmt.Sprintf("bd: close %s", id)
+		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
+			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
+			return fmt.Errorf("dolt commit: %w", err)
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -348,10 +356,12 @@ func (s *DoltStore) DeleteIssue(ctx context.Context, id string) error {
 		for _, table := range []string{"issues", "dependencies", "labels", "comments", "events", "child_counters", "issue_snapshots", "compaction_snapshots"} {
 			_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
 		}
-		commitMsg := fmt.Sprintf("bd: delete %s", id)
-		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-			return fmt.Errorf("dolt commit: %w", err)
+		if staged, err := issueops.HasStagedChanges(ctx, tx); err == nil && staged {
+			commitMsg := fmt.Sprintf("bd: delete %s", id)
+			if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
+				commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
+				return fmt.Errorf("dolt commit: %w", err)
+			}
 		}
 		return nil
 	}); err != nil {
@@ -425,10 +435,12 @@ func (s *DoltStore) DeleteIssues(ctx context.Context, ids []string, cascade bool
 		for _, table := range []string{"issues", "dependencies", "labels", "comments", "events", "child_counters", "issue_snapshots", "compaction_snapshots"} {
 			_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
 		}
-		commitMsg := fmt.Sprintf("bd: delete %d issue(s)", result.DeletedCount)
-		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-			return fmt.Errorf("dolt commit: %w", err)
+		if staged, err := issueops.HasStagedChanges(ctx, tx); err == nil && staged {
+			commitMsg := fmt.Sprintf("bd: delete %d issue(s)", result.DeletedCount)
+			if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
+				commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
+				return fmt.Errorf("dolt commit: %w", err)
+			}
 		}
 		return nil
 	}); err != nil {

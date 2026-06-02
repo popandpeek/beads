@@ -41,6 +41,7 @@ import (
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/types"
@@ -1745,6 +1746,13 @@ func (s *DoltStore) CommitWithConfig(ctx context.Context, message string) error 
 	}
 	defer conn.Close()
 
+	// Check before calling DOLT_COMMIT to avoid Dolt server warning logs when
+	// there is nothing to commit. DOLT_COMMIT generates a server-side warning
+	// even when the error is handled gracefully by the caller.
+	if hasPending, err := issueops.HasPendingChanges(ctx, conn); err != nil || !hasPending {
+		return nil
+	}
+
 	if _, err := conn.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', ?, '--author', ?)", message, s.commitAuthorString()); err != nil {
 		if isDoltNothingToCommit(err) {
 			return nil
@@ -1768,6 +1776,11 @@ func (s *DoltStore) doltAddAndCommit(ctx context.Context, tables []string, commi
 		if _, err := conn.ExecContext(ctx, "CALL DOLT_ADD(?)", table); err != nil {
 			return fmt.Errorf("dolt add %s: %w", table, err)
 		}
+	}
+	// Check for staged changes before committing to avoid Dolt server warning
+	// logs when DOLT_ADD staged nothing (e.g., the table had no actual changes).
+	if staged, err := issueops.HasStagedChanges(ctx, conn); err != nil || !staged {
+		return nil
 	}
 	if _, err := conn.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
 		commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {

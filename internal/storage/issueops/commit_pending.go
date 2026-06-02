@@ -13,6 +13,19 @@ type SQLQuerier interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }
 
+// HasStagedChanges checks whether any changes are currently staged (via DOLT_ADD)
+// and ready for DOLT_COMMIT. This is a cheaper alternative to calling DOLT_COMMIT
+// and silently swallowing "nothing to commit" errors, which generate Dolt server
+// warning logs even when the error is handled gracefully.
+func HasStagedChanges(ctx context.Context, db SQLQuerier) (bool, error) {
+	var count int
+	err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM dolt_status WHERE staged = 1`).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("failed to check staged changes: %w", err)
+	}
+	return count > 0, nil
+}
+
 // HasPendingChanges checks whether there are any committable changes in the
 // Dolt working set, excluding tables matched by dolt_ignore.
 func HasPendingChanges(ctx context.Context, db SQLQuerier) (bool, error) {
